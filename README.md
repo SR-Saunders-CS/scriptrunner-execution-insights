@@ -1,4 +1,4 @@
-# ScriptRunner RRD Usage PoC
+# ScriptRunner Execution Insights
 
 > A proof of concept showing how to surface ScriptRunner execution data
 > programmatically on Jira Data Center.
@@ -34,7 +34,7 @@ exists and is accessible. What you build on top of it is up to you.
 
 ### Step 1 — Find your script IDs
 
-Run [`scripts/01-discover-ids.groovy`](scripts/01-discover-ids.groovy) in
+Run [`scripts/discover-ids.groovy`](https://github.com/SR-Saunders-CS/scriptrunner-execution-insights/blob/main/scripts/discover-ids.groovy) in
 the Script Console.
 
 It prints a visual HTML report showing the correct RRD key for every:
@@ -44,7 +44,7 @@ It prints a visual HTML report showing the correct RRD key for every:
 
 > For Scheduled Jobs, Escalation Services, and Listeners the ID is a UUID
 > visible in the SR admin URL when you click Edit. See the
-> [Field Guide](docs/field-guide.md) for details.
+> [Field Guide](https://github.com/SR-Saunders-CS/scriptrunner-execution-insights/blob/main/docs/field-guide.md) for details.
 
 Before running, set your node directory name at the top of the script:
 
@@ -65,7 +65,7 @@ new File(home, "scriptrunner/rrd").listFiles()?.each { println it.name }
 
 ### Step 2 — Run the usage report
 
-Open [`scripts/02-usage-report.groovy`](scripts/02-usage-report.groovy) and
+Open [`scripts/usage-report.groovy`](https://github.com/SR-Saunders-CS/scriptrunner-execution-insights/blob/main/scripts/usage-report.groovy) and
 set the two values at the top:
 
 ```groovy
@@ -88,7 +88,7 @@ Run it in the Script Console. It outputs a simple HTML table showing:
 ### Step 3 — Multi-node clusters (optional)
 
 If your Jira instance runs on multiple nodes, use
-[`scripts/03-usage-report-multi-node.groovy`](scripts/03-usage-report-multi-node.groovy)
+[`scripts/usage-report-multi-node.groovy`](https://github.com/SR-Saunders-CS/scriptrunner-execution-insights/blob/main/scripts/usage-report-multi-node.groovy)
 instead. It discovers all node directories automatically and sums counts
 across every node — no hardcoded node name needed.
 
@@ -97,25 +97,25 @@ across every node — no hardcoded node name needed.
 ## Repository Structure
 
 ```
-scriptrunner-rrd-poc/
+scriptrunner-execution-insights/
 │
-├── README.md                              ← you are here
+├── README.md                           ← you are here
 │
 ├── scripts/
-│   ├── 01-discover-ids.groovy            ← run first: find RRD keys for
-│   │                                        script fields, post-functions,
-│   │                                        and REST endpoints
+│   ├── discover-ids.groovy            ← run first: find RRD keys for
+│   │                                     script fields, post-functions,
+│   │                                     and REST endpoints
 │   │
-│   ├── 02-usage-report.groovy            ← single-node usage report for
-│   │                                        one script ID
+│   ├── usage-report.groovy            ← single-node usage report for
+│   │                                     one script ID
 │   │
-│   └── 03-usage-report-multi-node.groovy ← same report, sums across all
-│                                            nodes automatically
+│   └── usage-report-multi-node.groovy ← same report, sums across all
+│                                         nodes automatically
 │
 └── docs/
-    └── field-guide.md                    ← deep dive: how RRD works, how
-                                             to find IDs for every feature
-                                             type, output explained
+    └── field-guide.md                 ← deep dive: how RRD works, how
+                                          to find IDs for every feature
+                                          type, output explained
 ```
 
 ---
@@ -190,5 +190,5 @@ with how the data is read, natural next steps include:
 - Alert via Slack or email when a script stops running
 - Compare execution counts before and after a Jira upgrade
 
-See the [Field Guide](docs/field-guide.md) for a deeper explanation of
+See the [Field Guide](https://github.com/SR-Saunders-CS/scriptrunner-execution-insights/blob/main/docs/field-guide.md) for a deeper explanation of
 every concept used here.
