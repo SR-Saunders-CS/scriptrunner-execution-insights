@@ -25,8 +25,7 @@ exists and is accessible. What you build on top of it is up to you.
 
 - Jira Data Center with ScriptRunner installed
 - Access to the ScriptRunner **Script Console**
-  (`/plugins/servlet/scriptrunner/admin/console`)
-- No server access required — everything runs inside Jira
+
 
 ---
 
@@ -46,8 +45,8 @@ def home = ComponentAccessor.getComponent(JiraHome).home
 new File(home, "scriptrunner/rrd").listFiles()?.each { println it.name }
 ```
 
-The output will be one or more directory names — for example `dc-saunders-0`.
-That is your `NODE_ID`.
+The output will be one or more directory names — for example, [/var/atlassian/application-data/jira/shared-home/scriptrunner/rrd/dc-saunders-0]
+Where `dc-saunders-0`. is the `NODE_ID`.
 
 ---
 
