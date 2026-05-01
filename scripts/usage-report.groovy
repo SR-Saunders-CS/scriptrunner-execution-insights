@@ -5,33 +5,18 @@
 //
 // PURPOSE: Show that ScriptRunner records execution data for every script
 // it runs, and that data is accessible programmatically. This reads one
-// script's RRD file and renders a simple metrics table.
+// script's RRD file and renders a simple metrics table — including the
+// script's name and feature type, looked up automatically from the ID.
 //
 // MULTI-NODE CLUSTER? Use 03-usage-report-multi-node.groovy instead.
 //
-// See docs/field-guide.md for how to find the right SCRIPT_ID and
-// NODE_ID for each feature type (Listeners, Jobs, Post-Functions, etc.).
-// Run 01-discover-ids.groovy to find IDs for Script Fields,
-// Post-Functions, and REST Endpoints automatically.
+// Run 01-discover-ids.groovy first to find the correct SCRIPT_ID.
 // ═══════════════════════════════════════════════════════════════════════
 
 
 // ── ⚙ CONFIGURE THESE TWO VALUES ────────────────────────────────────────
 
-// The RRD key is the filename (without .rrd4j) under:
-//   $JIRA_HOME/scriptrunner/rrd/{nodeId}/
-//
-// Key format by feature type:
-//   Scheduled Job / Escalation Service / Listener / Post-Function
-//     → the UUID shown in the SR admin URL  e.g. "e2c59022-d52f-48ae-..."
-//   Script Field
-//     → fieldConfigurationSchemeId (NOT the Jira custom field ID)
-//       Load it from the 'com.onresolve.jira.groovy.groovyrunner:customfields'
-//       row in the propertytext table — see the full v54 report for how.
-//   REST Endpoint  → "{METHOD}-{endpointName}"  e.g. "GET-myEndpoint"
-//   JQL Function   → the function name itself    e.g. "myJqlFunction"
-
-String SCRIPT_ID = "e2c59022-d52f-48ae-bf23-ec04dc5238dc"  // ← swap this
+String SCRIPT_ID = "e2c59022-d52f-48ae-bf23-ec04dc5238dc"  // ←  find this from discover-ids script
 String NODE_ID   = "dc-saunders-0"                          // ← your node dir
 
 
@@ -39,42 +24,157 @@ String NODE_ID   = "dc-saunders-0"                          // ← your node dir
 
 import com.atlassian.jira.component.ComponentAccessor
 import com.atlassian.jira.config.util.JiraHome
+import com.atlassian.jira.workflow.WorkflowManager
+import com.onresolve.scriptrunner.scheduled.ScheduledScriptJobManager
+import com.onresolve.scriptrunner.scheduled.model.AbstractScheduledJobCommand
+import com.opensymphony.workflow.loader.FunctionDescriptor
+import groovy.json.JsonSlurper
+import groovy.sql.Sql
+import java.sql.Connection
+import org.ofbiz.core.entity.ConnectionFactory
+import org.ofbiz.core.entity.DelegatorInterface
 import org.rrd4j.ConsolFun
 import org.rrd4j.core.FetchData
 import org.rrd4j.core.RrdDb
 
 
-// ── Calculate the time windows we care about ─────────────────────────────
-// RRD works in epoch seconds (not milliseconds), so we convert everything
-// here once. We'll use these boundaries when bucketing the fetched rows.
+// ── Time windows ──────────────────────────────────────────────────────────
 
-long currentTimeSeconds    = (long)(System.currentTimeMillis() / 1000)
-long thirtyDaysInSeconds   = 30L * 86_400L
-long sixtyDaysInSeconds    = 60L * 86_400L
-long ninetyDaysInSeconds   = 90L * 86_400L
+long nowSec   = (long)(System.currentTimeMillis() / 1000)
+long sec30d   = 30L * 86_400L
+long sec60d   = 60L * 86_400L
+long sec90d   = 90L * 86_400L
 
 
-// ── Locate the RRD file on disk ───────────────────────────────────────────
-// ScriptRunner writes one .rrd4j file per script under
-// $JIRA_HOME/scriptrunner/rrd/. We build the path from the two config
-// values at the top of this script.
+// ── Locate the RRD file ───────────────────────────────────────────────────
 
 JiraHome jiraHome = ComponentAccessor.getComponent(JiraHome)
-File rrdFile = new File(
-    jiraHome.home, "scriptrunner/rrd/${NODE_ID}/${SCRIPT_ID}.rrd4j"
-)
+File rrdFile = new File(jiraHome.home, "scriptrunner/rrd/${NODE_ID}/${SCRIPT_ID}.rrd4j")
 
 if (!rrdFile.exists()) {
     return "<p style='color:red'>RRD file not found: ${rrdFile.absolutePath}<br>" +
-           "This means the script has never run, or the ID / node name is wrong.</p>"
+           "Check the SCRIPT_ID and NODE_ID values at the top of this script.<br>" +
+           "Run 01-discover-ids.groovy to find the correct values.</p>"
 }
 
 
-// ── Open the RRD database and fetch 90 days of data ──────────────────────
-// ConsolFun.AVERAGE reads the daily consolidated archive — the same data
-// source the SR admin UI Performance tab graphs use. The 5-minute archive
-// (what the Performance tab reads in real time) is not used here because
-// it only retains a short window; the daily archive covers up to ~2 years.
+// ── Identify the script — name and feature type ───────────────────────────
+// We work out what this SCRIPT_ID belongs to by checking each feature type
+// in turn. The ID format tells us where to look:
+//   METHOD-name  → REST Endpoint
+//   numeric      → Script Field (fieldConfigurationSchemeId)
+//   UUID         → Job, Escalation Service, Post-Function, or Listener
+//   anything else → JQL Function
+
+String featureType = "Unknown"
+String scriptName  = SCRIPT_ID  // fallback — overwritten below if found
+String scriptExtra = ""         // optional second line of context
+
+boolean isRestPattern = SCRIPT_ID.matches(/(?i)(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)-.+/)
+boolean isNumeric     = SCRIPT_ID.matches(/\d+/)
+boolean isUuid        = SCRIPT_ID.matches(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)
+
+if (isRestPattern) {
+    // ── REST Endpoint ─────────────────────────────────────────────────────
+    // The key encodes both the HTTP method and the endpoint name.
+    featureType = "REST Endpoint"
+    String method = SCRIPT_ID.split('-')[0].toUpperCase()
+    String name   = SCRIPT_ID.replaceFirst(/(?i)^[A-Z]+-/, '')
+    scriptName  = name
+    scriptExtra = "HTTP Method: ${method}"
+
+} else if (isNumeric) {
+    // ── Script Field ──────────────────────────────────────────────────────
+    // The RRD key is the fieldConfigurationSchemeId, not the Jira custom
+    // field ID. We look up the display name from the customfields property.
+    featureType = "Script Field"
+    try {
+        DelegatorInterface del = ComponentAccessor.getComponent(DelegatorInterface)
+        Connection conn = ConnectionFactory.getConnection(del.getGroupHelperName("default"))
+        try {
+            Sql sql = new Sql(conn)
+            sql.eachRow(
+                "SELECT pt.\"propertyvalue\" FROM \"propertytext\" pt" +
+                " JOIN \"propertyentry\" pe ON pe.\"id\" = pt.\"id\"" +
+                " WHERE pe.\"property_key\" = 'com.onresolve.jira.groovy.groovyrunner:customfields'"
+            ) { r ->
+                String v = r.getAt('propertyvalue') as String
+                if (v) {
+                    (new JsonSlurper().parseText(v) as List<Map>).each { Map cfg ->
+                        if (cfg['fieldConfigurationSchemeId']?.toString() == SCRIPT_ID) {
+                            scriptName  = (cfg['name'] as String) ?: SCRIPT_ID
+                            scriptExtra = "Custom Field ID: customfield_${cfg['customFieldId']}"
+                        }
+                    }
+                }
+            }
+        } finally {
+            try { conn?.close() } catch (ignored) {}
+        }
+    } catch (ignored) {}
+
+} else if (isUuid) {
+    // ── UUID — check Jobs, Escalation Services, then Post-Functions ───────
+    // If not found in any of those, it is most likely a Script Listener —
+    // but we cannot confirm this programmatically.
+
+    // Check Scheduled Jobs and Escalation Services
+    try {
+        ScheduledScriptJobManager jobMgr =
+            ComponentAccessor.getOSGiComponentInstanceOfType(ScheduledScriptJobManager)
+        AbstractScheduledJobCommand match = jobMgr?.load()
+            ?.find { it.id == SCRIPT_ID } as AbstractScheduledJobCommand
+        if (match) {
+            boolean isEscalation = match.class.simpleName == 'EscalationServiceCommand'
+            featureType = isEscalation ? "Escalation Service" : "Scheduled Job"
+            scriptName  = match.notes ?: match.id ?: SCRIPT_ID
+            scriptExtra = "Owner: ${match.ownedBy ?: match.userId ?: '—'}"
+        }
+    } catch (ignored) {}
+
+    // Check Workflow Post-Functions (only if not already found above)
+    if (featureType == "Unknown") {
+        try {
+            WorkflowManager wfm = ComponentAccessor.getWorkflowManager()
+            wfm?.getWorkflows()?.each { wf ->
+                if (featureType != "Unknown") return
+                wf.allActions?.each { action ->
+                    if (featureType != "Unknown") return
+                    List<FunctionDescriptor> fns = []
+                    try {
+                        fns = action.unconditionalResult?.postFunctions
+                            as List<FunctionDescriptor> ?: []
+                    } catch (ignored2) {}
+                    fns.each { FunctionDescriptor fd ->
+                        if (fd.args['FIELD_FUNCTION_ID'] as String == SCRIPT_ID) {
+                            featureType = "Workflow Post-Function"
+                            scriptName  = "${wf.name} → ${action.name}"
+                            scriptExtra = "Workflow active: ${wf.isActive()}"
+                        }
+                    }
+                }
+            }
+        } catch (ignored) {}
+    }
+
+    // If still unknown — most likely a Script Listener
+    if (featureType == "Unknown") {
+        featureType = "Script Listener (unconfirmed)"
+        scriptName  = "Unknown — UUID not found in Jobs, Escalation Services, or Post-Functions"
+        scriptExtra = "If this is a listener, the UUID is correct. " +
+                      "SR does not expose listener names via a public API."
+    }
+
+} else {
+    // ── JQL Function ──────────────────────────────────────────────────────
+    // The RRD key IS the function name.
+    featureType = "JQL Function"
+    scriptName  = SCRIPT_ID
+    scriptExtra = "JQL usage: issueFunction in ${SCRIPT_ID}(...)"
+}
+
+
+// ── Read the RRD file ─────────────────────────────────────────────────────
 
 RrdDb rrdDatabase = RrdDb.getBuilder()
     .setPath(rrdFile.absolutePath)
@@ -82,100 +182,75 @@ RrdDb rrdDatabase = RrdDb.getBuilder()
     .build()
 
 FetchData fetchedData = rrdDatabase
-    .createFetchRequest(ConsolFun.AVERAGE, currentTimeSeconds - ninetyDaysInSeconds, currentTimeSeconds)
+    .createFetchRequest(ConsolFun.AVERAGE, nowSec - sec90d, nowSec)
     .fetchData()
 
 rrdDatabase.close()
-
-
-// ── Unpack the raw arrays from the fetched data ───────────────────────────
-// Each row is one consolidated daily bucket.
-//   timestamps  — the epoch-second timestamp for that bucket
-//   bucketCounts    — number of executions recorded in that bucket
-//   bucketDurations — average execution time (ms) recorded in that bucket
-// NaN means no data was recorded for that bucket — we skip those below.
 
 long[]   timestamps      = fetchedData.timestamps
 double[] bucketCounts    = fetchedData.getValues('count')
 double[] bucketDurations = fetchedData.getValues('duration')
 
 
-// ── Walk every daily bucket and accumulate the totals we need ────────────
-// We tally execution counts into three rolling windows (30 / 60 / 90 days)
-// and separately accumulate duration samples so we can compute an average.
-// We also track the timestamp of the most recent bucket that had activity,
-// which becomes the "last run" date shown in the table.
+// ── Accumulate metrics ────────────────────────────────────────────────────
 
-double executionCount30Days  = 0
-double executionCount60Days  = 0
-double executionCount90Days  = 0
-double totalDurationSum      = 0
-int    durationSampleCount   = 0
-long   lastExecutionTimestamp = 0L
+double count30 = 0, count60 = 0, count90 = 0
+double durSum  = 0
+int    durCnt  = 0
+long   lastTs  = 0L
 
 for (int i = 0; i < fetchedData.rowCount; i++) {
-    long   bucketTimestamp = timestamps[i]
-    double bucketCount     = bucketCounts[i]
-    double bucketDuration  = bucketDurations[i]
+    double c = bucketCounts[i]
+    double d = bucketDurations[i]
+    long   ts = timestamps[i]
 
-    // Accumulate execution counts into whichever windows this bucket falls in.
-    // A bucket can fall in multiple windows (e.g. 15 days ago is in all three).
-    if (!Double.isNaN(bucketCount)) {
-        executionCount90Days += bucketCount
-
-        if (bucketTimestamp >= currentTimeSeconds - sixtyDaysInSeconds) {
-            executionCount60Days += bucketCount
-        }
-        if (bucketTimestamp >= currentTimeSeconds - thirtyDaysInSeconds) {
-            executionCount30Days += bucketCount
-        }
-
-        // Record the most recent bucket that actually had executions in it.
-        if (bucketCount > 0 && bucketTimestamp > lastExecutionTimestamp) {
-            lastExecutionTimestamp = bucketTimestamp
-        }
+    if (!Double.isNaN(c)) {
+        count90 += c
+        if (ts >= nowSec - sec60d) count60 += c
+        if (ts >= nowSec - sec30d) count30 += c
+        if (c > 0 && ts > lastTs)  lastTs = ts
     }
-
-    // Accumulate duration samples separately so we can average them later.
-    if (!Double.isNaN(bucketDuration)) {
-        totalDurationSum    += bucketDuration
-        durationSampleCount++
-    }
+    if (!Double.isNaN(d)) { durSum += d; durCnt++ }
 }
 
 
-// ── Format the accumulated totals for display ─────────────────────────────
-// RRD stores averages per window, so the summed counts are approximate for
-// high-frequency scripts. We round to the nearest integer and prefix with ~
-// to signal that. Duration is a straight mean across all sampled buckets.
-// The last-run timestamp is converted from epoch seconds to a readable date.
+// ── Format for display ────────────────────────────────────────────────────
 
-String formattedCount30Days = "~${(long)(executionCount30Days + 0.5)}"
-String formattedCount60Days = "~${(long)(executionCount60Days + 0.5)}"
-String formattedCount90Days = "~${(long)(executionCount90Days + 0.5)}"
+def fmtCount = { double v -> "~${(long)(v + 0.5)}" }
 
-String averageDurationDisplay = durationSampleCount > 0
-    ? "${(long)(totalDurationSum / durationSampleCount)} ms"
-    : "—"
-
-// RRD timestamps are epoch seconds — multiply by 1000 to get milliseconds
-// before passing to Java's Date, which expects milliseconds.
-String lastRunDateDisplay = lastExecutionTimestamp > 0
-    ? new java.text.SimpleDateFormat("yyyy-MM-dd").format(new Date(lastExecutionTimestamp * 1000L))
+String avgDur  = durCnt > 0 ? "${(long)(durSum / durCnt)} ms" : "—"
+String lastRun = lastTs > 0
+    ? new java.text.SimpleDateFormat("yyyy-MM-dd").format(new Date(lastTs * 1000L))
     : "— (no data in last 90 days)"
 
 
-// ── Render the results as an HTML table ───────────────────────────────────
-// The Script Console displays whatever this script returns, and it renders
-// HTML directly. We build a simple styled table with one row per metric.
+// ── Render HTML ───────────────────────────────────────────────────────────
 
 return """
 <html><body style="font-family:sans-serif;font-size:13px;color:#172B4D;margin:16px">
-  <h2 style="color:#0052CC">ScriptRunner — RRD Usage PoC</h2>
-  <p style="color:#6B778C">
-    Script ID: <code>${SCRIPT_ID}</code><br>
-    RRD file: <code>${rrdFile.absolutePath}</code>
-  </p>
+
+  <h2 style="color:#0052CC">ScriptRunner — RRD Usage Report</h2>
+
+  <table border="0" cellpadding="4" cellspacing="0" style="margin-bottom:16px">
+    <tr>
+      <td style="color:#6B778C;padding-right:16px">Feature Type</td>
+      <td><strong>${featureType}</strong></td>
+    </tr>
+    <tr>
+      <td style="color:#6B778C;padding-right:16px">Name</td>
+      <td><strong>${scriptName}</strong></td>
+    </tr>
+    ${scriptExtra ? "<tr><td style='color:#6B778C;padding-right:16px'>Details</td><td>${scriptExtra}</td></tr>" : ""}
+    <tr>
+      <td style="color:#6B778C;padding-right:16px">Script ID</td>
+      <td><code>${SCRIPT_ID}</code></td>
+    </tr>
+    <tr>
+      <td style="color:#6B778C;padding-right:16px">RRD file</td>
+      <td><code>${rrdFile.absolutePath}</code></td>
+    </tr>
+  </table>
+
   <table border="1" cellpadding="8" cellspacing="0"
          style="border-collapse:collapse;min-width:400px">
     <thead>
@@ -184,17 +259,19 @@ return """
       </tr>
     </thead>
     <tbody>
-      <tr><td>Executions — last 30 days</td><td>${formattedCount30Days}</td></tr>
-      <tr><td>Executions — last 60 days</td><td>${formattedCount60Days}</td></tr>
-      <tr><td>Executions — last 90 days</td><td>${formattedCount90Days}</td></tr>
-      <tr><td>Avg duration (over 90 days)</td><td>${averageDurationDisplay}</td></tr>
-      <tr><td>Last execution (date only)</td><td>${lastRunDateDisplay}</td></tr>
+      <tr><td>Executions — last 30 days</td><td>${fmtCount(count30)}</td></tr>
+      <tr><td>Executions — last 60 days</td><td>${fmtCount(count60)}</td></tr>
+      <tr><td>Executions — last 90 days</td><td>${fmtCount(count90)}</td></tr>
+      <tr><td>Avg duration (over 90 days)</td><td>${avgDur}</td></tr>
+      <tr><td>Last execution (date only)</td><td>${lastRun}</td></tr>
     </tbody>
   </table>
+
   <p style="color:#6B778C;font-size:11px;margin-top:12px">
     ⏱ Counts come from the RRD daily archive and may lag by up to one
     consolidation cycle. Use the SR admin Performance tab for real-time data.
     Counts prefixed with ~ are approximate (RRD stores averages per window).
   </p>
+
 </body></html>
 """
