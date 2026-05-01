@@ -73,10 +73,10 @@ feature type on your instance:
 | JQL Functions | Function name | ✅ Yes (if called at least once) |
 | Script Fragments | Name + enabled status | ✅ Yes (inventory only — not tracked) |
 | Behaviours | Name + enabled status | ✅ Yes (inventory only — not tracked) |
-| Script Listeners | Instructions + UUID hints | ⚠ Partial — see below |
+| Script Listeners | Instructions + UUID hints | ⚠ No — see below |
 
 Each card in the report shows a **SCRIPT_ID** value and an **RRD ✓** badge
-if an RRD file already exists for that script on your node.
+If an RRD file already exists for that script on your node.
 
 #### A note on Script Listeners
 ScriptRunner doesn't expose a public API to list listener UUIDs, so you'll need to grab them from the browser URL.
@@ -87,7 +87,7 @@ Copy the UUID from the end of the URL: https://<your-jira-base-url>/plugins/serv
 
 Match it against the UUIDs listed below.
 
-Example: https://jira.example.com/plugins/servlet/scriptrunner/admin/listeners/edit/dae8a1ee-f9fa-4300-af7a-f836597c9c2f → UUID is dae8a1ee-f9fa-4300-af7a-f836597c9c2f
+Example: jira.example.com/plugins/servlet/scriptrunner/admin/listeners/edit/dae8a1ee-f9fa-4300-af7a-f836597c9c2f → UUID is dae8a1ee-f9fa-4300-af7a-f836597c9c2f
 ---
 
 ### Step 3 — Run the usage report
