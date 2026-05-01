@@ -7,6 +7,12 @@
 // the ScriptRunner admin UI uses — no external dependencies, no changes
 // made to any data.
 //
+// HOW IT WORKS — big picture:
+//   1. Open one database connection and load all SR configuration from the DB.
+//   2. Walk the RRD files on disk to get execution counts and durations.
+//   3. For each feature type (jobs, listeners, fields, etc.), build one Row.
+//   4. Render all rows as an HTML table and return it to the Script Console.
+//
 // ─────────────────────────────────────────────────────────────────────────
 // CONFIGURATION
 // ─────────────────────────────────────────────────────────────────────────
@@ -15,14 +21,20 @@
 // Find the UUID by editing a listener in SR admin and copying it from the URL.
 //
 Map<String, String> listenerIds = [
-    // "paste-uuid-here" : "Listener display name",
+    // "paste-uuid-here"                     : "Listener display name", below is an example of a UUID and the Listener name
+   // "dae8a1ee-f9fa-4300-af7a-f836597c9c2f" : "Welcome Comment on Issue Creation"
 ] as Map<String, String>
 
 // Set to true if this is a multi-node Data Center cluster.
+// When false, only the first node directory is read (safe for single-node).
 boolean MULTI_NODE = false
 
 // ─────────────────────────────────────────────────────────────────────────
 
+// ── Imports ───────────────────────────────────────────────────────────────
+// Groovy requires all external classes to be declared at the top.
+// These cover: Jira core APIs, ScriptRunner APIs, workflow APIs,
+// database access, JSON parsing, HTML building, and the RRD library.
 import com.atlassian.jira.component.ComponentAccessor
 import com.atlassian.jira.config.util.JiraHome
 import com.atlassian.jira.workflow.JiraWorkflow
@@ -49,54 +61,101 @@ import org.rrd4j.core.FetchData
 import org.rrd4j.core.RrdDb
 
 // ── Time windows ──────────────────────────────────────────────────────────
-final long NOW     = System.currentTimeMillis()
-final long D30     = 30L * 86_400_000L
-final long D60     = 60L * 86_400_000L
-final long D90     = 90L * 86_400_000L
-final long NOW_SEC = (NOW / 1000L) as long
-final long D30_SEC = 30L * 86_400L
-final long D60_SEC = 60L * 86_400L
-final long D90_SEC = 90L * 86_400L
+// We need "now" and three look-back boundaries (30 / 60 / 90 days ago).
+// These are computed once here and reused throughout the script.
+//
+// Two sets of units are needed because different APIs speak different languages:
+//   - The database stores timestamps in MILLISECONDS (standard Java time).
+//   - The RRD library stores timestamps in SECONDS (Unix epoch convention).
+//
+// 86_400_000 = the number of milliseconds in one day  (1000 ms × 60 s × 60 min × 24 h)
+// 86_400     = the number of seconds in one day
+//
+// The underscores in the numbers are just a readability aid — Groovy ignores them.
+final long NOW     = System.currentTimeMillis()   // current time in milliseconds
+final long D30     = 30L * 86_400_000L            // 30 days expressed in milliseconds
+final long D60     = 60L * 86_400_000L            // 60 days expressed in milliseconds
+final long D90     = 90L * 86_400_000L            // 90 days expressed in milliseconds
+final long NOW_SEC = (NOW / 1000L) as long        // current time in seconds (for RRD)
+final long D30_SEC = 30L * 86_400L               // 30 days expressed in seconds (for RRD)
+final long D60_SEC = 60L * 86_400L               // 60 days expressed in seconds (for RRD)
+final long D90_SEC = 90L * 86_400L               // 90 days expressed in seconds (for RRD)
 
+// Collects non-fatal problems encountered during data loading.
+// These are shown as a warning banner in the HTML output rather than
+// crashing the whole script — so the report still renders even if one
+// data source is unavailable.
 List<String> loadWarnings = []
 
+// ── Row — one row in the output table ────────────────────────────────────
+// Every ScriptRunner feature (job, listener, field, etc.) becomes one Row.
+// Fields default to "n/a" or "—" so the table always has something to show
+// even when no execution data is available for a particular script.
 class Row {
-    String type
-    String name
-    String script
-    String enabled
-    String owner
-    String c30         = "n/a"
-    String c60         = "n/a"
-    String c90         = "n/a"
-    String lastRun     = "—"
-    String avgDuration = "—"
+    String type           // feature type label, e.g. "Scheduled Job"
+    String name           // human-readable name of the script
+    String script         // file path or "(inline script)"
+    String enabled        // "true", "false", or "⚠ broken"
+    String owner          // the user who owns / last modified the script
+    String c30 = "n/a"   // execution count — last 30 days
+    String c60 = "n/a"   // execution count — last 60 days
+    String c90 = "n/a"   // execution count — last 90 days
+    String lastRun     = "—"   // date of most recent execution (yyyy-MM-dd)
+    String avgDuration = "—"   // mean execution time across the 90-day window
 }
 
+// The list that accumulates every Row before we render the HTML table.
 List<Row> rows = []
 
+// ── fmt — date formatter ──────────────────────────────────────────────────
+// Converts a millisecond timestamp (the standard Java format) into a
+// human-readable date string like "2024-11-15".
+// We show date only — no time — because RRD's daily archive has day-level
+// resolution and showing a time would imply false precision.
 def fmt = { long epochMs ->
     new java.text.SimpleDateFormat("yyyy-MM-dd").format(new Date(epochMs))
 }
 
+// ── q — SQL identifier quoting ────────────────────────────────────────────
+// Different databases use different characters to quote column and table names:
+//   PostgreSQL / Oracle  →  "double quotes"
+//   MySQL / MariaDB      →  `backticks`
+//   SQL Server           →  [square brackets]
+//
+// We detect the database type once (inside the DB connection block below)
+// and assign this closure so every SQL query can call q('column_name')
+// instead of hard-coding a quoting style. Declared here as null so it is
+// in scope throughout the script; assigned inside the try block below.
 Closure<String> q
 
+// ── scriptRef — extract a script reference from a config map ──────────────
+// ScriptRunner stores script configuration as JSON blobs in the database.
+// The field name that holds the script path or inline code varies by feature
+// type, so we check several known field names in priority order.
+// Returns a file path string, "(inline script)", or "(no script)".
 def scriptRef = { Map<String, Object> cfg ->
     def raw = cfg['FIELD_JOB_CODE']
            ?: cfg['FIELD_SCRIPT_FILE_OR_SCRIPT']
            ?: cfg['FIELD_SCRIPT']
            ?: cfg['FIELD_LINK_CONDITION']
     if (!raw) return "(no script)"
+    // If the value is itself a nested map, the script path is inside it.
     if (raw instanceof Map) {
         Map<String, Object> m = raw as Map<String, Object>
         return (m['scriptPath'] as String)
             ?: (m['scriptFile'] as String)
             ?: (m['script'] ? "(inline script)" : "(no script)")
     }
+    // If the value is a plain string that looks like Groovy code, it is inline.
     String s = raw.toString().trim()
     return s.startsWith("import") || s.startsWith("//") ? "(inline script)" : s.take(100)
 }
 
+// ── decodeWfScript — decode a workflow post-function script reference ──────
+// Workflow post-function configuration is stored differently from other
+// feature types: the script config is Base64-encoded JSON inside the
+// FIELD_SCRIPT_FILE_OR_SCRIPT argument. We decode and parse it here.
+// Returns a file path, "(inline script)", or "(no script)".
 def decodeWfScript = { Map args ->
     String encoded = args['FIELD_SCRIPT_FILE_OR_SCRIPT'] as String
     if (!encoded) return "(no script)"
@@ -107,38 +166,63 @@ def decodeWfScript = { Map args ->
             ?: (parsed['scriptFile'] as String)
             ?: (parsed['script'] ? "(inline script)" : "(no script)")
     } catch (ignored) {
+        // If decoding fails the value is probably already plain text.
         return "(inline script)"
     }
 }
 
 // ── Database load ─────────────────────────────────────────────────────────
-Map<String, Map<String, Object>> hist = [:]
-Map<String, List<Map<String, Object>>> stash = [:]
-List<Map<String, Object>> restEndpoints = []
-Map<String, String> cfIdToRrdKey = [:]
-Map<String, String> cfIdToScript  = [:]
-Map<String, String> cfIdToOwner   = [:]
+// We open one JDBC connection and run all database queries inside a single
+// try/finally block so the connection is always closed, even if a query fails.
+//
+// Five things are loaded from the database:
+//   stash          — ScriptRunner's own config table (jobs, fragments, etc.)
+//   restEndpoints  — REST endpoint configuration
+//   cfIdToRrdKey   — maps a Jira custom field ID to its RRD file key
+//   cfIdToScript   — maps a custom field ID to its script reference
+//   cfIdToOwner    — maps a custom field ID to its owner
+//   hist           — aggregated execution counts from the SR history table
+//                    (used as a fallback when no RRD file exists)
+
+Map<String, Map<String, Object>> hist = [:]           // execution history keyed by script ID
+Map<String, List<Map<String, Object>>> stash = [:]    // SR config blobs keyed by feature type
+List<Map<String, Object>> restEndpoints = []          // REST endpoint config entries
+Map<String, String> cfIdToRrdKey = [:]                // customFieldId → RRD file key
+Map<String, String> cfIdToScript  = [:]               // customFieldId → script reference
+Map<String, String> cfIdToOwner   = [:]               // customFieldId → owner username
 
 Connection conn = null
 try {
+    // ComponentAccessor is the Jira service locator — it gives us access to
+    // any Jira or ScriptRunner component without needing dependency injection.
     DelegatorInterface del = ComponentAccessor.getComponent(DelegatorInterface)
+    // ConnectionFactory gives us a raw JDBC connection to the Jira database.
     conn = ConnectionFactory.getConnection(del.getGroupHelperName("default"))
 
+    // Detect which database engine we are talking to so we can quote
+    // identifiers correctly in every SQL query below.
     String dbProduct = conn.metaData.databaseProductName?.toLowerCase() ?: ''
     boolean isMysql  = dbProduct.contains('mysql')
     boolean isMssql  = dbProduct.contains('microsoft') || dbProduct.contains('sql server')
 
+    // Now that we know the DB type, assign the quoting closure declared above.
     q = { String name ->
         if (isMssql) return '[' + name + ']'
         if (isMysql) return '`' + name + '`'
-        return '"' + name + '"'
+        return '"' + name + '"'   // ANSI standard — works for PostgreSQL and Oracle
     }
 
+    // schemaFilter is appended to information_schema queries on MySQL/MariaDB
+    // to restrict results to the current database. Other databases do not need it.
     String dbName      = conn.catalog ?: ''
     String schemaFilter = isMysql ? "AND table_schema = '" + dbName + "' " : ''
     Sql sql            = new Sql(conn)
 
-    // Scheduled jobs and fragments are stored in AO_4B00E6_STASH_SETTINGS
+    // ── Load STASH_SETTINGS ───────────────────────────────────────────────
+    // AO_4B00E6_STASH_SETTINGS is ScriptRunner's own configuration table.
+    // Each row has a KEY (feature type, e.g. "scheduled_jobs") and a SETTING
+    // (a JSON array of config objects for all scripts of that type).
+    // We parse each JSON blob and store it in the `stash` map.
     try {
         sql.eachRow(
             'SELECT ' + q('KEY') + ', ' + q('SETTING') +
@@ -156,7 +240,11 @@ try {
         log.warn(msg); loadWarnings << msg
     }
 
-    // REST endpoint configuration is stored in the propertytext table
+    // ── Load REST endpoint configuration ──────────────────────────────────
+    // REST endpoint config is stored as a single JSON blob in Jira's
+    // propertytext table, identified by a well-known property key.
+    // We join propertytext (the value) with propertyentry (the key name)
+    // to find the right row.
     try {
         sql.eachRow(
             "SELECT pt." + q('propertyvalue') +
@@ -176,8 +264,13 @@ try {
         log.warn(msg); loadWarnings << msg
     }
 
-    // Script field configuration — critically, this contains the fieldConfigurationSchemeId
-    // which is the key SR uses for RRD files, not the Jira customFieldId
+    // ── Load script field configuration ───────────────────────────────────
+    // Script field config is also stored in propertytext, under a different key.
+    //
+    // IMPORTANT: Jira identifies custom fields by their customFieldId (e.g. 10045).
+    // ScriptRunner identifies script fields in RRD by their fieldConfigurationSchemeId
+    // (a different number). We build lookup maps here so the Script Fields section
+    // below can find the right RRD file for each custom field.
     try {
         sql.eachRow(
             "SELECT pt." + q('propertyvalue') +
@@ -192,14 +285,19 @@ try {
                     (new JsonSlurper().parseText(v) as List<Map<String, Object>>).each { cfg ->
                         String cfId   = cfg['customFieldId']?.toString()
                         String rrdKey = cfg['fieldConfigurationSchemeId']?.toString()
-                        if (!cfId) return
+                        if (!cfId) return   // skip entries with no field ID
                         if (rrdKey) cfIdToRrdKey[cfId] = rrdKey
+                        // The script reference can be stored as a nested map (custom script)
+                        // or as a plain string class name (built-in "canned" field type).
                         def scriptCfg = cfg['FIELD_SCRIPT_FILE_OR_SCRIPT']
                         if (scriptCfg instanceof Map) {
                             Map<String, Object> sm = scriptCfg as Map<String, Object>
                             cfIdToScript[cfId] = (sm['scriptPath'] as String)
                                 ?: (sm['script'] ? "(inline script)" : "(no script)")
                         } else {
+                            // "canned-script" is a fully-qualified class name like
+                            // "com.example.CannedScriptFieldConfig". We strip the package
+                            // and known suffixes to produce a short readable label.
                             String canned = cfg['canned-script'] as String
                             if (canned) {
                                 String label = canned.tokenize('.').last()
@@ -222,7 +320,14 @@ try {
         log.warn(msg); loadWarnings << msg
     }
 
-    // Execution history from the SR database table — used as fallback when no RRD file exists
+    // ── Load execution history from the SR run-result table ───────────────
+    // ScriptRunner writes a row to a database table every time a script runs.
+    // The table name varies between SR versions, so we try two known patterns
+    // and use whichever one exists.
+    //
+    // We run a single GROUP BY query that counts executions in each time window
+    // in one pass, rather than three separate queries. The result is stored in
+    // `hist`, keyed by script ID, and used as a fallback when no RRD file exists.
     String tbl = null
     for (String pat : ['AO_%_SCRIPT_RUN_RESULT', 'AO_%_SCRIPT_EXECUTION']) {
         if (tbl) break
@@ -235,6 +340,8 @@ try {
     }
 
     if (tbl) {
+        // Column names also vary between SR versions, so we inspect the schema
+        // to find the right column for the script ID and the timestamp.
         List<String> cols = []
         sql.eachRow(
             "SELECT column_name FROM information_schema.columns " +
@@ -246,6 +353,9 @@ try {
         String timeCol = cols.find { it.equalsIgnoreCase('CREATED') } ?: cols.find { it.equalsIgnoreCase('START_TIME') }
 
         if (keyCol && timeCol) {
+            // One SQL query counts executions in all three windows simultaneously
+            // using conditional SUM (CASE WHEN timestamp >= cutoff THEN 1 ELSE 0 END).
+            // This is more efficient than running three separate queries.
             sql.eachRow(
                 "SELECT " + q(keyCol) + " AS sid, COUNT(*) AS c90, " +
                 "SUM(CASE WHEN " + q(timeCol) + " >= " + (NOW - D60) + " THEN 1 ELSE 0 END) AS c60, " +
@@ -258,7 +368,7 @@ try {
                     c30: (r.getAt('c30') as Long) ?: 0L,
                     c60: (r.getAt('c60') as Long) ?: 0L,
                     c90: (r.getAt('c90') as Long) ?: 0L,
-                    t  : r.getAt('last_t') as Long
+                    t  : r.getAt('last_t') as Long   // most recent execution timestamp (ms)
                 ] as Map<String, Object>)
             }
         } else {
@@ -274,14 +384,25 @@ try {
     String msg = "DB load failed: ${ex.message}"
     log.warn(msg); loadWarnings << msg
 } finally {
+    // Always close the connection, whether the queries succeeded or failed.
+    // The ?. operator means "call close() only if conn is not null".
     try { conn?.close() } catch (ignored) {}
 }
 
+// If the DB connection failed entirely, q was never assigned above.
+// Set it to the ANSI standard (double-quotes) so the rest of the script
+// can still call q() safely without null-checking everywhere.
 if (!q) q = { String name -> '"' + name + '"' }
 
 // ── RRD load ──────────────────────────────────────────────────────────────
-// ScriptRunner writes a .rrd4j file for each script it tracks. These files
-// are the primary source for execution counts and duration data.
+// RRD (Round Robin Database) is the primary source for execution counts.
+// ScriptRunner writes one .rrd4j file per script the first time it runs,
+// under $JIRA_HOME/scriptrunner/rrd/{nodeId}/{scriptId}.rrd4j.
+//
+// On a multi-node cluster each node has its own subdirectory. We read all
+// of them and sum the counts so the report shows instance-wide totals.
+//
+// The result is stored in `rrdData`, a map from script ID → metrics map.
 Map<String, Map<String, Object>> rrdData = [:]
 
 try {
@@ -289,11 +410,23 @@ try {
     File rrdBase = new File(jiraHome.home, "scriptrunner/rrd")
 
     if (rrdBase.exists()) {
+        // Each subdirectory of rrdBase corresponds to one cluster node.
         List<File> nodeDirs = (rrdBase.listFiles()
             ?.findAll { it.isDirectory() }?.sort { it.name } ?: []) as List<File>
 
+        // On a single-node instance, only read the first directory.
+        // This avoids accidentally reading stale data from a decommissioned node.
         if (!MULTI_NODE) nodeDirs = nodeDirs ? [nodeDirs.first()] : []
 
+        // readRrd — reads one .rrd4j file and returns a metrics map.
+        // Returns null if the file cannot be read (e.g. locked or corrupt).
+        //
+        // RRD stores data as a circular buffer of time-bucketed averages.
+        // We request the AVERAGE consolidation function over the last 90 days,
+        // which gives us one data point per day. Each point has:
+        //   count    — average executions per 5-minute window in that day
+        //   duration — average execution time (ms) in that day
+        // NaN means no data was recorded for that bucket — we skip those.
         def readRrd = { File rrdFile ->
             RrdDb db = null
             try {
@@ -308,7 +441,7 @@ try {
 
                 double sum30 = 0, sum60 = 0, sum90 = 0, durSum = 0
                 int durCnt = 0
-                long lastTs = 0L
+                long lastTs = 0L   // tracks the most recent bucket that had data
 
                 (0..<rowCount).each { int i ->
                     double c = counts[i]; double d = durations[i]; long ts = timestamps[i]
@@ -316,7 +449,7 @@ try {
                         sum90 += c
                         if (ts >= NOW_SEC - D60_SEC) sum60 += c
                         if (ts >= NOW_SEC - D30_SEC) sum30 += c
-                        if (ts > lastTs) lastTs = ts
+                        if (ts > lastTs) lastTs = ts   // keep the latest timestamp seen
                     }
                     if (!Double.isNaN(d)) { durSum += d; durCnt++ }
                 }
@@ -329,22 +462,28 @@ try {
             }
         }
 
+        // Walk every node directory and read every .rrd4j file inside it.
+        // The filename (without the extension) is the script's RRD key.
         nodeDirs.each { File nodeDir ->
             nodeDir.listFiles()?.findAll { it.name.endsWith('.rrd4j') }?.each { File f ->
                 String key = f.name.replace('.rrd4j', '')
                 Map result = readRrd(f)
-                if (result == null) return
+                if (result == null) return   // skip unreadable files
                 if (!rrdData.containsKey(key)) {
+                    // First time we have seen this key — store the result directly.
                     rrdData[key] = result as Map<String, Object>
                 } else {
+                    // We have already seen this key from a previous node.
+                    // Sum the counts and average the durations across nodes.
                     Map<String, Object> ex = rrdData[key] as Map<String, Object>
-                    long ed = (ex.avgDuration as Long) ?: -1L
-                    long nd = (result.avgDuration as Long) ?: -1L
+                    long ed = (ex.avgDuration as Long) ?: -1L   // existing average duration
+                    long nd = (result.avgDuration as Long) ?: -1L   // new node's average duration
                     rrdData[key] = ([
                         sum30: (ex.sum30 as double) + (result.sum30 as double),
                         sum60: (ex.sum60 as double) + (result.sum60 as double),
                         sum90: (ex.sum90 as double) + (result.sum90 as double),
                         lastTs: Math.max((ex.lastTs as Long) ?: 0L, (result.lastTs as Long) ?: 0L),
+                        // Average the two durations if both are valid; otherwise keep whichever is valid.
                         avgDuration: (ed >= 0 && nd >= 0) ? ((ed + nd) / 2L) as long
                                    : (ed >= 0 ? ed : nd)
                     ] as Map<String, Object>)
@@ -361,6 +500,12 @@ try {
 }
 
 // ── DiagnosticsManager — in-memory fallback ───────────────────────────────
+// The DiagnosticsManager is a ScriptRunner component that keeps the last
+// ~15 execution results for each script in JVM memory (not persisted to disk).
+// It is used as a last-resort fallback for feature types that do not write
+// to the database history table — specifically escalation services and listeners.
+// Because it only holds ~15 records, counts from this source are approximate
+// and are prefixed with "~" in the output.
 DiagnosticsManager dm = null
 try {
     dm = ComponentAccessor.getOSGiComponentInstanceOfType(DiagnosticsManager)
@@ -369,15 +514,30 @@ try {
     log.warn(msg); loadWarnings << msg
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────
+// ── Helper closures ───────────────────────────────────────────────────────
+// The closures below are small reusable functions that populate a Row's
+// execution counts from one of the three data sources (RRD, database, memory).
+// They are defined here, after all data is loaded, because they close over
+// (reference) the rrdData, hist, and dm variables populated above.
+
+// attributedKeys — tracks every script ID that has been matched to a known
+// feature. Any ID in `hist` that is NOT in this set at the end of the script
+// belongs to a deleted script and is reported in the "orphaned records" section.
 Set<String> attributedKeys = [] as Set<String>
 
+// fmtCount — formats a raw RRD count for display.
+// RRD stores averages per 5-minute window, so summing them gives a fractional
+// result for high-frequency scripts. We round to the nearest integer and add
+// a "~" prefix when the value is not a whole number, to signal approximation.
 def fmtCount = { double sum ->
     if (sum <= 0.0) return "0"
     long r = Math.round(sum)
     return Math.abs(sum - r) > 0.1 ? "~${r}" : "${r}"
 }
 
+// attachFromRrd — populates a Row's counts from the rrdData map.
+// Returns true if data was found for the given key, false if not.
+// The caller uses the return value to decide whether to try a fallback source.
 def attachFromRrd = { Row row, String key ->
     if (!key) return false
     Map<String, Object> d = rrdData[key] as Map<String, Object>
@@ -386,12 +546,16 @@ def attachFromRrd = { Row row, String key ->
     row.c60 = fmtCount(d.sum60 as double)
     row.c90 = fmtCount(d.sum90 as double)
     long ts = (d.lastTs as Long) ?: 0L
+    // lastTs is in seconds (RRD convention) — multiply by 1000 to get milliseconds for fmt().
     row.lastRun = ts > 0L ? fmt(ts * 1000L) : "—"
     long dur = (d.avgDuration as Long) ?: -1L
     row.avgDuration = dur >= 0L ? "${dur}ms" : "—"
     return true
 }
 
+// attachFromDb — populates a Row's counts from the database history map.
+// Used when no RRD file exists for a script (e.g. the file was deleted,
+// or the script has only run on a different node).
 def attachFromDb = { Row row, String sid ->
     if (!sid) return
     Map<String, Object> h = hist[sid] as Map<String, Object>
@@ -401,9 +565,15 @@ def attachFromDb = { Row row, String sid ->
     row.lastRun = h.t ? fmt(h.t as long) : "—"
 }
 
+// attachFromMemory — populates a Row's counts from the DiagnosticsManager.
+// Used as a last resort for escalation services and listeners, which do not
+// write to the database history table. Because the DiagnosticsManager only
+// retains ~15 records, counts are capped and prefixed with "~".
 def attachFromMemory = { Row row, String fid ->
     if (!dm || !fid) { row.c30 = "0"; row.c60 = "0"; row.c90 = "0"; return }
     List<ScriptRunResult> results = dm.getResultsForFunction(fid) ?: []
+    // If the list is at capacity (15 records), the true count is higher than
+    // what we can see — prefix with "~" to communicate this uncertainty.
     boolean atCap = results.size() >= 15
     String pfx = atCap ? "~" : ""
     row.c30 = pfx + results.findAll { it.created != null && it.created >= NOW - D30 }.size()
@@ -413,15 +583,24 @@ def attachFromMemory = { Row row, String fid ->
     row.lastRun = ts ? fmt(ts.max() as long) : "—"
 }
 
+// attachWithRrdOrDb — tries RRD first, falls back to the database.
+// Also registers the script ID in attributedKeys so it is not reported
+// as an orphaned record at the end of the script.
 def attachWithRrdOrDb = { Row row, String sid ->
     if (sid) attributedKeys << sid
     if (!attachFromRrd(row, sid)) attachFromDb(row, sid)
 }
 
+// attachWithRrdOrMemory — tries RRD first, falls back to DiagnosticsManager.
+// Used for escalation services and listeners, which have no DB history table.
 def attachWithRrdOrMemory = { Row row, String fid ->
     if (!attachFromRrd(row, fid)) attachFromMemory(row, fid)
 }
 
+// addStashRow — builds a Row from a stash config map and appends it to `rows`.
+// Used for feature types whose configuration lives in STASH_SETTINGS
+// (currently: script fragments). The `hasHistory` flag controls whether
+// we look for execution counts in the database (true) or RRD (false).
 def addStashRow = { String type, Map<String, Object> cfg, boolean hasHistory ->
     Row r = new Row(
         type   : type,
@@ -435,17 +614,32 @@ def addStashRow = { String type, Map<String, Object> cfg, boolean hasHistory ->
     rows << r
 }
 
-// ── Quartz next-run map — used to detect broken triggers ──────────────────
+// ── Quartz next-run map ───────────────────────────────────────────────────
+// Quartz is the job scheduling library that Jira uses internally.
+// ScriptRunner registers each scheduled job and escalation service with
+// Quartz so they fire at the right time.
+//
+// A "broken" job is one that is enabled in ScriptRunner but has no Quartz
+// trigger — meaning it will never fire. This can happen after a Jira restart
+// or a failed job registration. We detect this by checking whether Quartz
+// knows about the job and whether it has a next run time.
+//
+// quartzNextRun maps each SR script ID → the Date of its next scheduled run
+// (or null if Quartz has the job registered but with no trigger).
 Map<String, Date> quartzNextRun = [:]
 try {
     SchedulerService svc = ComponentAccessor.getComponent(SchedulerService)
     svc?.getJobRunnerKeysForAllScheduledJobs()?.each { runnerKey ->
         String rk = runnerKey.toString()
+        // Only inspect jobs registered by ScriptRunner — skip Jira's own jobs.
         if (!rk.toLowerCase().contains('onresolve') && !rk.toLowerCase().contains('scriptrunner')) return
         svc.getJobsByJobRunnerKey(runnerKey).each { JobDetails jd ->
             Map<String, java.io.Serializable> params = jd.parameters ?: [:]
+            // The SR script ID may be stored under different parameter names
+            // depending on the SR version and job type.
             String srId = params['id'] as String ?: params['scriptId'] as String ?: params['jobId'] as String
             if (!srId) {
+                // Last resort: extract a UUID from the Quartz job ID string itself.
                 java.util.regex.Matcher m = jd.jobId.toString() =~
                     /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/
                 if (m.find()) srId = m.group(1)
@@ -459,6 +653,14 @@ try {
 }
 
 // ── Scheduled Jobs and Escalation Services ────────────────────────────────
+// Both feature types are managed by the same SR job manager and stored in
+// the same STASH_SETTINGS key ("scheduled_jobs"). We tell them apart by
+// checking the class name of the job command object:
+//   EscalationServiceCommand → Escalation Service
+//   anything else            → Scheduled Job
+//
+// We also build a lookup map from the stash data so we can retrieve the
+// script reference for jobs that do not expose it via the command object.
 Map<String, Map<String, Object>> stashJobsById = [:]
 (stash['scheduled_jobs'] ?: []).each { Map<String, Object> cfg ->
     if (cfg.id) stashJobsById[cfg.id as String] = cfg
@@ -476,13 +678,17 @@ jobMgr?.load()?.each { AbstractScheduledJobCommand j ->
     boolean isEscalation = j.class.simpleName == 'EscalationServiceCommand'
     String scriptStr = "—"
     if (j instanceof AbstractCustomScheduledJobCommand) {
+        // Custom jobs expose their script config directly on the command object.
         AbstractCustomScheduledJobCommand cmd = j as AbstractCustomScheduledJobCommand
         scriptStr = cmd.scriptConfig?.scriptPath
             ?: (cmd.scriptConfig?.script ? "(inline script)" : (isEscalation ? "(not accessible)" : "(no script)"))
     } else {
+        // Other job types (e.g. canned jobs) do not expose the script directly —
+        // fall back to the stash config we loaded from the database.
         Map<String, Object> sc = stashJobsById[j.id] as Map<String, Object>
         scriptStr = sc ? scriptRef(sc) : "—"
     }
+    // A job is "broken" if it is enabled in SR but Quartz has no next run time for it.
     boolean broken = !j.disabled && quartzNextRun.containsKey(j.id) && quartzNextRun[j.id] == null
     Row r = new Row(
         type   : isEscalation ? "Escalation Service" : "Scheduled Job",
@@ -491,16 +697,31 @@ jobMgr?.load()?.each { AbstractScheduledJobCommand j ->
         enabled: j.disabled ? "false" : broken ? "⚠ broken" : "true",
         owner  : j.ownedBy ?: j.userId ?: "—"
     )
+    // Escalation services fall back to memory (DiagnosticsManager) because they
+    // do not write to the database history table. Scheduled jobs fall back to DB.
     if (isEscalation) attachWithRrdOrMemory(r, j.id) else attachWithRrdOrDb(r, j.id)
     rows << r
 }
 
 // ── Script Fragments ──────────────────────────────────────────────────────
+// Script Fragments are UI customisations (e.g. extra panels on issue screens).
+// ScriptRunner does not record execution history for them, so counts will
+// always be "n/a". They are listed here for inventory purposes only.
+// The `false` argument tells addStashRow to look in RRD (not the DB),
+// which will find nothing — resulting in the "n/a" default values.
 (stash['ui_fragments'] ?: stash['fragments'] ?: []).each {
     addStashRow("Script Fragment", it, false)
 }
 
 // ── REST Endpoints ────────────────────────────────────────────────────────
+// REST endpoint config comes from the property table (loaded above).
+// Execution counts come from RRD — SR creates the RRD file on first call,
+// so endpoints that have never been called will show "n/a" (not "0").
+//
+// We match each endpoint config entry to its RRD key by looking for an RRD
+// key whose name (after stripping the HTTP method prefix) appears in the
+// endpoint's display name. This is a heuristic — it may not match perfectly
+// if the endpoint name contains unusual characters.
 List<String> restRrdKeys = rrdData.keySet()
     .findAll { it.matches(/(?i)(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)-.+/) }
     .sort() as List<String>
@@ -517,11 +738,16 @@ restEndpoints.each { Map<String, Object> cfg ->
         enabled: cfg.disabled ? "false" : "true",
         owner  : (cfg['ownedBy'] ?: "—") as String
     )
+    // If no RRD key was matched, the endpoint has never been called — show "n/a".
     if (!attachFromRrd(r, rrdKey)) { r.c30 = "n/a"; r.c60 = "n/a"; r.c90 = "n/a" }
     rows << r
 }
 
 // ── Script Listeners ──────────────────────────────────────────────────────
+// Listeners react to Jira events (e.g. issue created, comment added).
+// ScriptRunner does not expose an API to list listener UUIDs, so the user
+// must add them manually to the listenerIds map at the top of this script.
+// We warn if the map is empty so the user knows data may be missing.
 if (listenerIds.isEmpty()) {
     loadWarnings << "No listener UUIDs configured — add them to the listenerIds map at the top of the script."
 }
@@ -532,6 +758,12 @@ listenerIds.each { String fid, String name ->
 }
 
 // ── Workflow Post-Functions ───────────────────────────────────────────────
+// Post-functions run automatically after a workflow transition (e.g. after
+// an issue is moved to "Done"). We walk every workflow → every transition →
+// every post-function, keeping only the ones that belong to ScriptRunner.
+//
+// The same post-function can appear in multiple workflow versions (active and
+// draft). We use seenFunctionIds to deduplicate so each function appears once.
 Set<String> seenFunctionIds = [] as Set<String>
 ComponentAccessor.getWorkflowManager()?.getWorkflows()?.each { JiraWorkflow wf ->
     wf.allActions?.each { ActionDescriptor action ->
@@ -541,14 +773,19 @@ ComponentAccessor.getWorkflowManager()?.getWorkflows()?.each { JiraWorkflow wf -
         pfs.each { FunctionDescriptor fd ->
             Map args = fd.args ?: [:]
             String cls = args['class.name'] as String ?: ''
+            // Skip post-functions that do not belong to ScriptRunner.
             if (!cls.contains('onresolve') && !cls.contains('scriptrunner')) return
             String fid = args['FIELD_FUNCTION_ID'] as String
+            // Skip if we have already added a row for this function ID.
             if (fid && seenFunctionIds.contains(fid)) return
             if (fid) seenFunctionIds << fid
             Row r = new Row(
                 type   : "Workflow Post-Function",
+                // Name shows "WorkflowName → TransitionName" for easy identification.
                 name   : "${wf.name} → ${action.name}",
                 script : decodeWfScript(args),
+                // "enabled" reflects whether the parent workflow is active —
+                // an inactive workflow means the post-function will never run.
                 enabled: wf.active ? "true" : "false",
                 owner  : "—"
             )
@@ -559,16 +796,24 @@ ComponentAccessor.getWorkflowManager()?.getWorkflows()?.each { JiraWorkflow wf -
 }
 
 // ── Script Fields ─────────────────────────────────────────────────────────
-// SR uses fieldConfigurationSchemeId as the RRD key, not the Jira customFieldId.
-// The mapping is loaded from the customfields property above.
+// Script Fields are custom fields whose value is computed by a Groovy script.
+// They run every time an issue is displayed, so they can have very high counts.
+//
+// IMPORTANT: Jira identifies custom fields by customFieldId (e.g. 10045).
+// ScriptRunner uses fieldConfigurationSchemeId as the RRD key — a different
+// number. The cfIdToRrdKey map (built from the DB load above) translates
+// between the two. Without this mapping, we would look for the wrong RRD file.
 ComponentAccessor.getCustomFieldManager()?.getCustomFieldObjects()
     ?.findAll { cf ->
         String tk = cf.customFieldType?.key ?: ''
+        // Keep only custom fields whose type key belongs to ScriptRunner.
+        // Exclude JQL function fields, which are handled separately below.
         (tk.contains('onresolve') || tk.contains('scriptrunner')) && !tk.contains('jqlFunctions')
     }
     ?.each { cf ->
         String cfId   = cf.idAsLong.toString()
-        String rrdKey = cfIdToRrdKey[cfId] ?: cfId
+        String rrdKey = cfIdToRrdKey[cfId] ?: cfId   // use scheme ID if known, else fall back to field ID
+        // Register both IDs as attributed so neither appears as an orphan.
         attributedKeys << cfId
         if (rrdKey != cfId) attributedKeys << rrdKey
         Row r = new Row(
@@ -583,8 +828,14 @@ ComponentAccessor.getCustomFieldManager()?.getCustomFieldObjects()
     }
 
 // ── JQL Functions ─────────────────────────────────────────────────────────
-// SR creates an RRD file for each JQL function on first use.
-// Functions that have never been called will not appear here.
+// JQL Functions let users write custom JQL clauses (e.g. issueFunction in myFunc(...)).
+// SR creates an RRD file for each function the first time it is used in a search.
+// Functions that have never been called will not have an RRD file and will not
+// appear in this report at all.
+//
+// We identify JQL function keys by elimination: any RRD key that is not a UUID,
+// not a plain number (script field scheme ID), and not an HTTP-method-prefixed
+// string (REST endpoint) must be a JQL function name.
 rrdData.keySet()
     .findAll { String k ->
         !k.matches(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/) &&
@@ -599,6 +850,9 @@ rrdData.keySet()
     }
 
 // ── Behaviours ────────────────────────────────────────────────────────────
+// Behaviours control how issue create/edit screens behave (e.g. hiding fields,
+// setting defaults). ScriptRunner does not record execution history for them,
+// so counts will always be "n/a". They are listed here for inventory only.
 BehaviourManager behaviourMgr = null
 try {
     behaviourMgr = ComponentAccessor.getOSGiComponentInstanceOfType(BehaviourManager)
@@ -614,15 +868,22 @@ behaviourMgr?.getAllConfigs()?.each { String id, BehaviourEditState state ->
 }
 
 // ── Orphaned DB records ───────────────────────────────────────────────────
+// Any script ID in the execution history (`hist`) that was never added to
+// `attributedKeys` belongs to a script that no longer exists in ScriptRunner
+// (e.g. it was deleted). We surface these in the HTML report so the user
+// knows the historical data exists even though the script is gone.
 List<String> orphanedNotes = []
 hist.each { String key, Map<String, Object> h ->
-    if (attributedKeys.contains(key)) return
+    if (attributedKeys.contains(key)) return   // already accounted for — skip
     String label = key.matches(/\d+/) ? "deleted script field id=${key}" : "deleted script ${key.take(8)}…"
     String lastRun = h.t ? fmt(h.t as long) : '—'
     orphanedNotes << (label + ": " + h.c90 + " execution(s) in last 90d, last run " + lastRun)
 }
 
-// ── Safety net — ensure every feature type has at least one row ───────────
+// ── Safety net ────────────────────────────────────────────────────────────
+// If a feature type has no configured scripts at all, we add a placeholder
+// row so the table always shows every type. This makes it obvious when a
+// type is genuinely empty rather than missing due to a data load failure.
 ["Scheduled Job", "Script Listener", "Script Fragment", "REST Endpoint",
  "Escalation Service", "Workflow Post-Function", "Script Field", "Behaviour"].each { String type ->
     if (rows.every { it.type != type }) {
@@ -631,6 +892,8 @@ hist.each { String key, Map<String, Object> h ->
 }
 
 // ── SR admin links ────────────────────────────────────────────────────────
+// Maps each feature type to its SR admin page URL. Used in the HTML table
+// to make each feature type badge a clickable link to the right admin page.
 Map<String, String> adminUrls = [
     "Scheduled Job"         : "/plugins/servlet/scriptrunner/admin/jobs",
     "Escalation Service"    : "/plugins/servlet/scriptrunner/admin/jobs",
@@ -644,6 +907,15 @@ Map<String, String> adminUrls = [
 ]
 
 // ── HTML output ───────────────────────────────────────────────────────────
+// Everything above has populated the `rows` list. We now render it as HTML.
+//
+// MarkupBuilder is a Groovy class that lets you write HTML as nested method
+// calls. Each method name becomes an HTML tag. For example:
+//   html { body { h1("Hello") } }
+// produces: <html><body><h1>Hello</h1></body></html>
+//
+// The output is written into a StringWriter (sw) and returned at the end.
+// The Script Console detects that the return value is HTML and renders it.
 StringWriter sw = new StringWriter()
 new MarkupBuilder(sw).html {
     head {
@@ -715,6 +987,7 @@ Click any feature type badge to open the corresponding SR admin page.
         }
 
         // ── Load warnings ─────────────────────────────────────────────────
+        // Shown only if one or more data sources failed to load.
         if (loadWarnings) {
             div(class: "error") {
                 mkp.yieldUnescaped(
@@ -854,6 +1127,9 @@ ${orphanedNotes ? '<strong>13. Deleted scripts with remaining execution history.
 """)
         }
 
+        // ── Main data table ───────────────────────────────────────────────
+        // One row per ScriptRunner feature. The feature type badge is a
+        // clickable link to the corresponding SR admin page (where available).
         table {
             thead { tr {
                 th("Feature Type"); th("Name"); th("Script")
@@ -877,12 +1153,17 @@ ${orphanedNotes ? '<strong>13. Deleted scripts with remaining execution history.
                         td(r.name)
                         td(r.script)
                         td {
+                            // Map the enabled value to a CSS class that colours it
+                            // green (on), red (off), orange (broken), or grey (unknown).
                             String cls = r.enabled == "true"     ? "on"
                                        : r.enabled == "false"    ? "off"
                                        : r.enabled == "⚠ broken" ? "broken" : "na"
                             span(class: cls, r.enabled)
                         }
                         td(r.owner)
+                        // Render each count cell. "n/a" gets a grey italic style.
+                        // Values starting with "~" are approximate — shown with a
+                        // dashed underline and a tooltip explaining why.
                         [r.c30, r.c60, r.c90].each { String val ->
                             if (val == "n/a") {
                                 td(class: "na", "n/a")
