@@ -81,11 +81,10 @@ if an RRD file already exists for that script on your node.
 #### A note on Script Listeners
 
 ScriptRunner does not expose a public API to list listener UUIDs, so listeners
-cannot be fully auto-discovered. The discovery script explains how to find
-each listener UUID manually from the SR admin UI, and surfaces any unattributed
-UUID RRD files at the bottom of the report — these may be listeners, but
-cannot be confirmed programmatically. Cross-reference them with
-SR admin → Listeners to identify them.
+cannot be fully auto-discovered. We cannot confirm this programmatically. To find out what a UUID belongs to:
+  1. Go to SR admin → Listeners
+  2. Click Edit next to each listener
+  3. Compare the UUID in the browser URL with the UUIDs listed below
 
 ---
 
