@@ -672,6 +672,12 @@ tr:hover td { background: #DEEBFF; }
 .approx { color: #FF8B00; font-weight: bold; cursor: help;
           border-bottom: 2px dashed #FF8B00; }
 .dur { color: #42526E; font-size: 11px; }
+.poc-banner { background: #FFEBE6; border: 2px solid #FF5630; border-radius: 4px;
+              padding: 12px 16px; margin-bottom: 12px; font-size: 13px; color: #BF2600; }
+.track-table th { background: #42526E; font-size: 11px; }
+.track-table td { font-size: 11px; }
+.yes  { color: #00875A; font-weight: bold; }
+.no   { color: #97A0AF; }
 """)
     }
     body {
@@ -680,36 +686,172 @@ tr:hover td { background: #DEEBFF; }
           "Scripts inventoried: ${rows.size()} | " +
           "RRD files loaded: ${rrdData.size()}")
 
+        // ── Consolidation delay notice ─────────────────────────────────────
         div(class: "warn") {
             mkp.yieldUnescaped("""
-<strong>⏱ Execution counts may not reflect activity from the last few hours.</strong><br>
-Counts are read from ScriptRunner's daily RRD archive, which consolidates periodically.
-For real-time data, use the <strong>Performance tab</strong> in the SR admin UI —
-it reads the 5-minute archive directly. Counts marked <strong>≈</strong> are approximate.
+<strong>⏱ Counts may not reflect recent executions — this is normal.</strong><br>
+Execution counts come from RRD's <strong>daily archive</strong>, which consolidates data
+from the 5-minute archive periodically. The exact rollup schedule is managed internally
+by ScriptRunner and may vary. This means:<br>
+&nbsp;&nbsp;• Scripts that ran recently may still show 0 until the next rollup completes.<br>
+&nbsp;&nbsp;• The <strong>Last Execution date</strong> is reliable once consolidated
+(daily resolution only — no time component).<br>
+&nbsp;&nbsp;• To confirm a script ran recently, use the SR admin UI
+<strong>Performance tab</strong> — it reads the 5-minute archive directly and updates immediately.<br>
+This is not a bug. Executions are recorded the moment they happen; they just need to roll
+up into the daily archive before this report can see them.
 """)
         }
 
-        div(class: "warn") {
+        // ── PoC banner ────────────────────────────────────────────────────
+        div(class: "poc-banner") {
             mkp.yieldUnescaped("""
-<strong>📋 Script Listeners require manual configuration.</strong><br>
-Add each listener UUID to the <code>listenerIds</code> map at the top of the script.
-Find the UUID by editing a listener in SR admin and copying it from the browser URL.
-Currently tracking <strong>${listenerIds.size()} listener(s)</strong>.
+<strong>⚠ PROOF OF CONCEPT — NOT FOR PRODUCTION USE</strong><br>
+This report is a technical PoC demonstrating what ScriptRunner usage data can be surfaced
+programmatically. Data is read directly from the same sources the SR admin UI uses.<br><br>
+<strong>✔ Read-only and safe to run.</strong> This script makes no changes to any data.
+Click any feature type badge to open the corresponding SR admin page.
 """)
         }
 
+        // ── Load warnings ─────────────────────────────────────────────────
         if (loadWarnings) {
             div(class: "error") {
-                mkp.yieldUnescaped("<strong>⚠ Data load warnings:</strong><br>" +
-                    loadWarnings.collect { "• ${it}" }.join("<br>"))
+                mkp.yieldUnescaped(
+                    "<strong>⚠ Data load warnings — some data may be incomplete:</strong><br>" +
+                    loadWarnings.collect { "• " + it }.join("<br>"))
             }
         }
 
-        if (orphanedNotes) {
-            div(class: "warn") {
-                mkp.yieldUnescaped("<strong>Deleted scripts with remaining execution history:</strong><br>" +
-                    orphanedNotes.collect { "• ${it}" }.join("<br>"))
-            }
+        // ── Listener action-required banner ───────────────────────────────
+        div(class: "warn") {
+            mkp.yieldUnescaped("""
+<strong>📋 Action required — Script Listeners need manual configuration</strong><br><br>
+ScriptRunner does not provide an API to auto-discover listeners, so each listener
+must be registered in this script manually by UUID. This is a one-time task per listener.<br><br>
+<strong>This report is currently tracking ${listenerIds.size()} listener(s).</strong>
+If that number does not match the count in your
+<a href="/plugins/servlet/scriptrunner/admin/listeners" target="_blank">SR admin → Listeners</a>
+page, some are missing.<br><br>
+<strong>How to add a missing listener — 4 steps:</strong><br>
+&nbsp;&nbsp;1. Go to <a href="/plugins/servlet/scriptrunner/admin/listeners" target="_blank">SR admin → Listeners</a><br>
+&nbsp;&nbsp;2. Click <strong>Edit</strong> next to the listener<br>
+&nbsp;&nbsp;3. Copy the UUID from the browser URL — it ends with <code>?id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx</code><br>
+&nbsp;&nbsp;4. Open this script, find the <code>listenerIds</code> map at the <strong>very top</strong>,
+and add: <code>"uuid-here" : "Listener name",</code><br><br>
+<strong>Good news:</strong> Once added, the report immediately shows the
+<strong>full execution history</strong> for that listener — up to 2 years.
+The data was always recorded by RRD; you are just telling the report where to look.
+""")
+        }
+
+        // ── Execution tracking reference table ────────────────────────────
+        div(class: "warn") {
+            mkp.yieldUnescaped("""
+<strong>Execution tracking — data sources and accuracy</strong><br>
+Execution counts are sourced from ScriptRunner's RRD (Round Robin Database) performance
+files, the same data that powers the SR admin UI Performance tab graphs.
+RRD data persists across Jira restarts and covers up to 2 years.
+""")
+            mkp.yieldUnescaped("""
+<table class="track-table" style="margin-top:8px">
+<thead><tr>
+  <th>Feature Type</th><th>Execution counts?</th><th>Primary source</th>
+  <th>Fallback</th><th>Important notes</th>
+</tr></thead>
+<tbody>
+<tr><td>Scheduled Job</td>
+    <td class="yes">✔ Yes</td><td>RRD (rrd4j file)</td>
+    <td>Database (SCRIPT_RUN_RESULT)</td>
+    <td>RRD records every execution regardless of log output.
+        <strong>⚠ broken</strong> = enabled but no Quartz trigger scheduled.</td></tr>
+<tr><td>Escalation Service</td>
+    <td class="yes">✔ Yes</td><td>RRD (rrd4j file)</td>
+    <td>JVM memory (DiagnosticsManager)</td>
+    <td>RRD replaces the previous 15-record memory cap.
+        <strong>⚠ broken</strong> = enabled but no Quartz trigger scheduled.</td></tr>
+<tr><td>Script Listener</td>
+    <td class="yes">✔ Yes</td><td>RRD (rrd4j file)</td>
+    <td>JVM memory (DiagnosticsManager)</td>
+    <td>Must be registered manually by UUID — see banner above.</td></tr>
+<tr><td>Workflow Post-Function</td>
+    <td class="yes">✔ Yes</td><td>RRD (rrd4j file)</td>
+    <td>Database (SCRIPT_RUN_RESULT)</td>
+    <td>Enabled reflects parent workflow active state.</td></tr>
+<tr><td>Script Field</td>
+    <td class="yes">✔ Yes (approx)</td><td>RRD (rrd4j file)</td>
+    <td>Database (SCRIPT_RUN_RESULT)</td>
+    <td>RRD key is <code>fieldConfigurationSchemeId</code> (loaded from the
+        <code>customfields</code> property), not the custom field ID.
+        Counts are approximate (~ prefix) — fields run on every issue view,
+        board load, and search result page.</td></tr>
+<tr><td>REST Endpoint</td>
+    <td class="yes">✔ Yes</td><td>RRD (rrd4j file)</td>
+    <td>n/a — endpoint never called</td>
+    <td><strong>n/a = endpoint has never been called.</strong>
+        0/0/0 = called before but not in the last 90 days
+        (or called today but not yet consolidated).</td></tr>
+<tr><td>JQL Function</td>
+    <td class="yes">✔ Yes</td><td>RRD (rrd4j file)</td><td>n/a</td>
+    <td>Only appears if called at least once — RRD file is created on first use.</td></tr>
+<tr><td>Script Fragment</td>
+    <td class="no">✘ Not tracked</td><td>—</td><td>—</td>
+    <td>SR does not record execution history for fragments.</td></tr>
+<tr><td>Behaviour</td>
+    <td class="no">✘ Not tracked</td><td>—</td><td>—</td>
+    <td>SR does not record execution history for behaviours.</td></tr>
+</tbody></table>
+""")
+        }
+
+        // ── Known limitations ─────────────────────────────────────────────
+        div(class: "warn") {
+            mkp.yieldUnescaped("""
+<strong>Known limitations</strong><br><br>
+<strong>1. Execution counts cover the last 90 days only.</strong>
+A count of 0 does not mean a script has never run — only that it has not run in the past 90 days.
+RRD retains up to 2 years of data; the 90-day window is a report design choice.<br><br>
+<strong>2. Script Field counts are approximate (~ prefix).</strong>
+Script fields can execute hundreds of times per 5-minute window (every issue view, board load,
+search result page). RRD stores the <em>average</em> executions per 5-minute window; the
+displayed total is the sum of those averages. It is a reliable indicator of relative activity
+but not an exact total.<br><br>
+<strong>3. Script Listeners require manual UUID entry.</strong>
+SR's internal ScriptRegistry is not accessible on this version, so listeners cannot be
+auto-enumerated. See the action-required banner above for step-by-step instructions.<br><br>
+<strong>4. Script column is blank for some feature types.</strong><br>
+&nbsp;&nbsp;• <strong>Script Fields</strong> — script content shown (inline or file path)
+for custom script fields. Built-in canned field types show the template name.<br>
+&nbsp;&nbsp;• <strong>Script Listeners, Behaviours, JQL Functions</strong> — held in ScriptRegistry, which is not accessible.<br>
+&nbsp;&nbsp;• <strong>Escalation Services</strong> — script is in "Additional Issue Actions", not in the standard config structure.<br>
+&nbsp;&nbsp;• <strong>REST Endpoints</strong> — show "(inline script)" correctly.<br><br>
+<strong>5. Owner column is blank for several feature types.</strong>
+Available for Scheduled Jobs, Escalation Services, Script Fragments, and Script Fields
+(where <code>ownedBy</code> is set). All other types require ScriptRegistry access.<br><br>
+<strong>6. Enabled column is blank or indirect for several feature types.</strong><br>
+&nbsp;&nbsp;• <strong>Script Listeners</strong> — not accessible (ScriptRegistry).<br>
+&nbsp;&nbsp;• <strong>JQL Functions</strong> — no enable/disable concept in SR; <code>—</code> is intentional.<br>
+&nbsp;&nbsp;• <strong>Workflow Post-Functions</strong> — reflects parent workflow active state, not the function itself.<br><br>
+<strong>7. Last Execution shows date only — no time.</strong>
+RRD's daily archive has day-level resolution only. There is no intra-day timestamp —
+the report shows the date only to avoid implying false precision.<br><br>
+<strong>8. A count of 0 with no Last Execution date (—) is ambiguous.</strong>
+It can mean: (a) never run, (b) ran but RRD file not yet written, or (c) data not yet
+consolidated. A count of 0 <em>with</em> a date means it ran more than 90 days ago.<br><br>
+<strong>9. REST Endpoint n/a = endpoint has never been called.</strong>
+SR only creates the RRD file on the first invocation — n/a is not a data gap, it means
+the endpoint has genuinely never been used.<br><br>
+<strong>10. JQL Functions only appear if called at least once.</strong>
+A function that exists but has never been used in a search will not appear here at all.<br><br>
+<strong>11. Avg Duration is the mean over all non-NaN 5-minute windows in 90 days.</strong>
+May not reflect recent performance for scripts with variable execution times.
+Use the SR admin UI Performance tab for a time-series view.<br><br>
+<strong>12. ⚠ broken trigger = enabled in SR but no Quartz trigger scheduled.</strong>
+The job will not run until repaired — disable then re-enable it, or restart Jira.<br><br>
+${orphanedNotes ? '<strong>13. Deleted scripts with remaining execution history.</strong><br>' +
+  'These no longer exist in SR but their database records are retained:<br>' +
+  orphanedNotes.collect { '&nbsp;&nbsp;• ' + it }.join('<br>') + '<br><br>' : ''}
+""")
         }
 
         table {
