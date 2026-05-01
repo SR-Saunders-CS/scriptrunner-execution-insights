@@ -34,8 +34,7 @@ exists and is accessible. What you build on top of it is up to you.
 
 ### Step 1 — Find your script IDs
 
-Run [`scripts/discover-ids.groovy`](https://github.com/SR-Saunders-CS/scriptrunner-execution-insights/blob/main/scripts/discover-ids.groovy) in
-the Script Console.
+Run [`scripts/discover-ids.groovy`](scripts/discover-ids.groovy) in the Script Console.
 
 It prints a visual HTML report showing the correct RRD key for every:
 - Script Field
@@ -44,7 +43,7 @@ It prints a visual HTML report showing the correct RRD key for every:
 
 > For Scheduled Jobs, Escalation Services, and Listeners the ID is a UUID
 > visible in the SR admin URL when you click Edit. See the
-> [Field Guide](https://github.com/SR-Saunders-CS/scriptrunner-execution-insights/blob/main/docs/field-guide.md) for details.
+> [Field Guide](docs/field-guide.md) for details.
 
 Before running, set your node directory name at the top of the script:
 
@@ -65,7 +64,7 @@ new File(home, "scriptrunner/rrd").listFiles()?.each { println it.name }
 
 ### Step 2 — Run the usage report
 
-Open [`scripts/usage-report.groovy`](https://github.com/SR-Saunders-CS/scriptrunner-execution-insights/blob/main/scripts/usage-report.groovy) and
+Open [`scripts/usage-report.groovy`](scripts/usage-report.groovy) and
 set the two values at the top:
 
 ```groovy
@@ -88,7 +87,7 @@ Run it in the Script Console. It outputs a simple HTML table showing:
 ### Step 3 — Multi-node clusters (optional)
 
 If your Jira instance runs on multiple nodes, use
-[`scripts/usage-report-multi-node.groovy`](https://github.com/SR-Saunders-CS/scriptrunner-execution-insights/blob/main/scripts/usage-report-multi-node.groovy)
+[`scripts/usage-report-multi-node.groovy`](scripts/usage-report-multi-node.groovy)
 instead. It discovers all node directories automatically and sums counts
 across every node — no hardcoded node name needed.
 
@@ -111,6 +110,9 @@ scriptrunner-execution-insights/
 │   │
 │   └── usage-report-multi-node.groovy ← same report, sums across all
 │                                         nodes automatically
+│
+├── advanced/
+│   └── execution-insights-advanced.groovy  ← see below
 │
 └── docs/
     └── field-guide.md                 ← deep dive: how RRD works, how
@@ -190,5 +192,33 @@ with how the data is read, natural next steps include:
 - Alert via Slack or email when a script stops running
 - Compare execution counts before and after a Jira upgrade
 
-See the [Field Guide](https://github.com/SR-Saunders-CS/scriptrunner-execution-insights/blob/main/docs/field-guide.md) for a deeper explanation of
+See the [Field Guide](docs/field-guide.md) for a deeper explanation of
 every concept used here.
+
+---
+
+## What a full implementation looks like
+
+The simple scripts above cover one script ID at a time. To show how far this
+approach can be taken, the `advanced/` folder contains a more complete example
+built on the same foundations.
+
+[`advanced/execution-insights-advanced.groovy`](https://github.com/SR-Saunders-CS/scriptrunner-execution-insights/blob/main/advanced/execution-insights-advanced.groovy)
+covers every ScriptRunner feature type in a single run and adds:
+- Automatic inventory of all feature types — Scheduled Jobs, Escalation
+  Services, Script Listeners, Workflow Post-Functions, Script Fields, REST
+  Endpoints, JQL Functions, Script Fragments, and Behaviours
+- Fallback data sources (database and in-memory) when no RRD file exists
+- Script Field RRD key resolution via the `customfields` property
+- Broken trigger detection via live Quartz scheduler data
+- Multi-node cluster support
+- Orphaned script detection from database records
+- A styled HTML report with inline documentation and known limitations
+
+**This advanced script is provided as-is, for reference only.**
+It is not maintained, not supported, and not intended to be used in
+production. It exists to show what is possible when you build on top of
+the primitives demonstrated in the simple scripts — nothing more.
+
+If you want to build something like it, start with the simple scripts
+and add what you need.
