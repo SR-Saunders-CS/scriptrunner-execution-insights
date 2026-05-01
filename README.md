@@ -32,26 +32,12 @@ exists and is accessible. What you build on top of it is up to you.
 
 ## Quick Start
 
-### Step 1 — Find your script IDs
+### Step 1 — Find your node name
 
-Run [`scripts/discover-ids.groovy`](scripts/discover-ids.groovy) in the Script Console.
+Every Jira Data Center node writes its RRD files to a separate directory.
+You need to know your node name before running any script.
 
-It prints a visual HTML report showing the correct RRD key for every:
-- Script Field
-- Workflow Post-Function
-- REST Endpoint
-
-> For Scheduled Jobs, Escalation Services, and Listeners the ID is a UUID
-> visible in the SR admin URL when you click Edit. See the
-> [Field Guide](docs/field-guide.md) for details.
-
-Before running, set your node directory name at the top of the script:
-
-```groovy
-String NODE_ID = "dc-saunders-0"   // ← change this to your node name
-```
-
-Not sure what your node name is? Run this one-liner in the Script Console:
+Run this one-liner in the Script Console:
 
 ```groovy
 import com.atlassian.jira.component.ComponentAccessor
@@ -60,15 +46,57 @@ def home = ComponentAccessor.getComponent(JiraHome).home
 new File(home, "scriptrunner/rrd").listFiles()?.each { println it.name }
 ```
 
+The output will be one or more directory names — for example `dc-saunders-0`.
+That is your `NODE_ID`.
+
 ---
 
-### Step 2 — Run the usage report
+### Step 2 — Run the discovery script
 
-Open [`scripts/usage-report.groovy`](scripts/usage-report.groovy) and
-set the two values at the top:
+Run [`scripts/discover-ids.groovy`](scripts/discover-ids.groovy) in the
+Script Console. Set your node name at the top first:
 
 ```groovy
-String SCRIPT_ID = "paste-your-id-here"   // ← from Step 1
+String NODE_ID = "dc-saunders-0"   // ← change this to your node name
+```
+
+The discovery script produces an HTML report covering every ScriptRunner
+feature type on your instance:
+
+| Feature Type | What it shows | Auto-discovered? |
+|---|---|---|
+| Scheduled Jobs | UUID + name + owner | ✅ Yes |
+| Escalation Services | UUID + name + owner | ✅ Yes |
+| Script Fields | `fieldConfigurationSchemeId` + field name | ✅ Yes |
+| Workflow Post-Functions | UUID + workflow + transition | ✅ Yes |
+| REST Endpoints | `METHOD-name` key | ✅ Yes (if called at least once) |
+| JQL Functions | Function name | ✅ Yes (if called at least once) |
+| Script Fragments | Name + enabled status | ✅ Yes (inventory only — not tracked) |
+| Behaviours | Name + enabled status | ✅ Yes (inventory only — not tracked) |
+| Script Listeners | Instructions + UUID hints | ⚠ Partial — see below |
+
+Each card in the report shows a **SCRIPT_ID** value and an **RRD ✓** badge
+if an RRD file already exists for that script on your node.
+
+#### A note on Script Listeners
+
+ScriptRunner does not expose a public API to list listener UUIDs, so listeners
+cannot be fully auto-discovered. The discovery script explains how to find
+each listener UUID manually from the SR admin UI, and surfaces any unattributed
+UUID RRD files at the bottom of the report — these may be listeners, but
+cannot be confirmed programmatically. Cross-reference them with
+SR admin → Listeners to identify them.
+
+---
+
+### Step 3 — Run the usage report
+
+Copy the **SCRIPT_ID** from the discovery report for the script you want to
+inspect. Open [`scripts/usage-report.groovy`](scripts/usage-report.groovy)
+and set the two values at the top:
+
+```groovy
+String SCRIPT_ID = "paste-your-id-here"   // ← from Step 2
 String NODE_ID   = "dc-saunders-0"        // ← your node name
 ```
 
@@ -84,7 +112,7 @@ Run it in the Script Console. It outputs a simple HTML table showing:
 
 ---
 
-### Step 3 — Multi-node clusters (optional)
+### Step 4 — Multi-node clusters (optional)
 
 If your Jira instance runs on multiple nodes, use
 [`scripts/usage-report-multi-node.groovy`](scripts/usage-report-multi-node.groovy)
@@ -101,9 +129,8 @@ scriptrunner-execution-insights/
 ├── README.md                           ← you are here
 │
 ├── scripts/
-│   ├── discover-ids.groovy            ← run first: find RRD keys for
-│   │                                     script fields, post-functions,
-│   │                                     and REST endpoints
+│   ├── discover-ids.groovy            ← run first: discovers RRD keys
+│   │                                     for every SR feature type
 │   │
 │   ├── usage-report.groovy            ← single-node usage report for
 │   │                                     one script ID
@@ -149,7 +176,7 @@ The RRD key (filename without `.rrd4j`) varies by feature type:
 | Escalation Service | UUID |
 | Script Listener | UUID |
 | Workflow Post-Function | UUID (`FIELD_FUNCTION_ID`) |
-| Script Field | `fieldConfigurationSchemeId` ⚠ not the custom field ID |
+| Script Field | `fieldConfigurationSchemeId` ⚠ not the Jira custom field ID |
 | REST Endpoint | `{METHOD}-{name}` e.g. `GET-myEndpoint` |
 | JQL Function | the function name itself |
 
@@ -169,16 +196,18 @@ A script that ran minutes ago may still show 0. Use the SR admin
 Performance tab for real-time confirmation.
 
 **Listener IDs must be found manually.**
-SR does not expose an API to list listener UUIDs. Go to SR admin →
-Listeners, click Edit next to a listener, and copy the UUID from the
-browser URL (`?id=...`).
+SR does not expose an API to list listener UUIDs. The discovery script
+surfaces unattributed UUID RRD files as hints, but cannot confirm which
+belong to listeners. Go to SR admin → Listeners, click Edit next to each
+listener, and copy the UUID from the browser URL (`?id=...`).
 
 **Behaviours and Script Fragments are not tracked.**
-SR does not write RRD files for these feature types.
+SR does not write RRD files for these feature types. They appear in the
+discovery script for inventory purposes only.
 
-**REST Endpoints only appear after their first call.**
-SR creates the RRD file on first invocation. An endpoint that has never
-been called will not appear in the discovery script.
+**REST Endpoints and JQL Functions only appear after their first call.**
+SR creates the RRD file on first invocation. Scripts that have never run
+will not appear in the discovery report.
 
 ---
 
@@ -203,8 +232,9 @@ The simple scripts above cover one script ID at a time. To show how far this
 approach can be taken, the `advanced/` folder contains a more complete example
 built on the same foundations.
 
-[`advanced/execution-insights-advanced.groovy`](https://github.com/SR-Saunders-CS/scriptrunner-execution-insights/blob/main/advanced/execution-insights-advanced.groovy)
+[`advanced/execution-insights-advanced.groovy`](advanced/execution-insights-advanced.groovy)
 covers every ScriptRunner feature type in a single run and adds:
+
 - Automatic inventory of all feature types — Scheduled Jobs, Escalation
   Services, Script Listeners, Workflow Post-Functions, Script Fields, REST
   Endpoints, JQL Functions, Script Fragments, and Behaviours
