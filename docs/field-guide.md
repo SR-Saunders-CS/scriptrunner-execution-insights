@@ -62,11 +62,10 @@ Run this in the Script Console and it prints every node directory name.
 
 **Single-node vs. multi-node:**
 - Single-node: one directory, use that name directly.
-- Multi-node (Data Center cluster): one directory per node. The PoC reads
-  one node only. To sum across all nodes you would loop over every node
-  directory, read the same `.rrd4j` file from each, and add the counts
-  together. See the **Multi-node** section at the bottom of this guide
-  for a minimal worked example.
+- Multi-node (Data Center cluster): one directory per node. Use
+  `03-usage-report-multi-node.groovy` — it discovers all node directories
+  automatically and sums counts across every node with no hardcoded node
+  name needed.
 
 ---
 
@@ -75,25 +74,28 @@ Run this in the Script Console and it prints every node directory name.
 The script ID is the **filename without `.rrd4j`**. The format varies by
 feature type.
 
-> **Shortcut for the three tricky ones:** Script Fields, Workflow
-> Post-Functions, and REST Endpoints all have IDs that are hard to find
-> manually. Run the **ID Discovery Script** (separate artifact) from the
-> Script Console and it prints every ID for all three feature types in one
-> go — ready to copy and paste into the PoC.
+> **Shortcut:** Run [`scripts/discover-ids.groovy`](../scripts/discover-ids.groovy)
+> from the Script Console. It automatically discovers the correct RRD key
+> for every feature type on your instance — Scheduled Jobs, Escalation
+> Services, Script Fields, Workflow Post-Functions, REST Endpoints, JQL
+> Functions, Script Fragments, and Behaviours — and displays them in a
+> single HTML report ready to copy from. Script Listeners are the only
+> exception (see below).
 
 ---
 
 ### Scheduled Jobs & Escalation Services
 
-**ID format:** UUID
+**ID format:** UUID  
+**Auto-discovered by:** `01-discover-ids.groovy` ✅
 
-**How to find it:**
+The discovery script lists every job and escalation service with its UUID,
+name, and owner. If you prefer to find one manually:
+
 1. Go to **SR admin → Jobs**
    (`/plugins/servlet/scriptrunner/admin/jobs`)
 2. Click **Edit** next to the job
-3. The UUID appears in the browser URL:
-   `?id=e2c59022-d52f-48ae-bf23-ec04dc5238dc`
-4. Copy everything after `?id=`
+3. Copy the UUID from the browser URL: `?id=e2c59022-d52f-48ae-bf23-ec04dc5238dc`
 
 **Example RRD filename:**
 ```
@@ -101,45 +103,53 @@ e2c59022-d52f-48ae-bf23-ec04dc5238dc.rrd4j
 ```
 
 > Escalation Services live on the same Jobs page and use the same UUID
-> format. They are distinguished by their type in the SR config, not by
-> their ID format.
+> format.
 
 ---
 
 ### Script Listeners
 
-**ID format:** UUID
+**ID format:** UUID  
+**Auto-discovered by:** ❌ Not possible — manual steps required
 
-**How to find it:**
+ScriptRunner does not expose a public API to list listener UUIDs, so the
+discovery script cannot show them automatically. You need to collect each
+UUID manually:
+
 1. Go to **SR admin → Listeners**
    (`/plugins/servlet/scriptrunner/admin/listeners`)
 2. Click **Edit** next to the listener
-3. Copy the UUID from the browser URL: `?id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
+3. Copy the UUID from the browser URL:
+   ```
+   .../scriptrunner/admin/listeners/edit/dae8a1ee-f9fa-4300-af7a-f836597c9c2f
+   ```
+   The UUID is the last segment — `dae8a1ee-f9fa-4300-af7a-f836597c9c2f`
+4. Use that UUID as the `SCRIPT_ID` in the usage report
+
+The execution data for that listener is already on disk — you are just
+telling the script where to look. Repeat once per listener.
 
 **Example RRD filename:**
 ```
 dae8a1ee-f9fa-4300-af7a-f836597c9c2f.rrd4j
 ```
 
-> SR does not expose an API to list all listener UUIDs programmatically.
-> You must collect them manually from the admin UI, one by one.
-
 ---
 
 ### Workflow Post-Functions
 
-**ID format:** UUID (`FIELD_FUNCTION_ID` stored in the function config)
+**ID format:** UUID (`FIELD_FUNCTION_ID` stored in the function config)  
+**Auto-discovered by:** `01-discover-ids.groovy` ✅
 
-The easiest way is to run the **ID Discovery Script** — it walks every
-workflow and transition automatically and prints a table of all SR
-post-function IDs alongside their workflow and transition names.
+The discovery script walks every workflow and transition automatically and
+shows every SR post-function alongside its workflow name, transition name,
+and active/inactive status. If you prefer to find one manually:
 
-If you prefer to find one manually:
 1. Go to **Jira admin → Workflows**
    (`/secure/admin/workflows/ListWorkflows.jspa`)
 2. Click **Edit** on the workflow → click the transition → **Post Functions**
 3. Click **Edit** on the ScriptRunner post-function
-4. The UUID is in the URL as `FIELD_FUNCTION_ID=xxxxxxxx-xxxx-...`
+4. Copy the UUID from the URL as `FIELD_FUNCTION_ID=xxxxxxxx-xxxx-...`
 
 **Example RRD filename:**
 ```
@@ -150,7 +160,8 @@ a1b2c3d4-e5f6-7890-abcd-ef1234567890.rrd4j
 
 ### Script Fields
 
-**ID format:** `fieldConfigurationSchemeId` — **NOT** the Jira custom field ID
+**ID format:** `fieldConfigurationSchemeId` — **NOT** the Jira custom field ID  
+**Auto-discovered by:** `01-discover-ids.groovy` ✅
 
 This is the most important gotcha with script fields. SR uses the
 **field configuration scheme ID** as the RRD key — not the Jira custom
@@ -158,20 +169,16 @@ field ID (e.g. `10900`) that you see in the field's URL or in
 `customfield_XXXXX`. Using the wrong ID will show 0 executions for every
 script field even when they are running constantly.
 
-The easiest way to get the correct ID is to run the **ID Discovery Script**
-— it reads the mapping directly from the Jira Java API (no DB query needed)
+The discovery script reads the correct mapping directly from the Jira API
 and prints every script field alongside both its custom field ID and its
-correct RRD key.
+correct RRD key:
 
-**Example output from the discovery script:**
 ```
-Field Name                               RRD Key          Custom Field ID
------------------------------------------------------------------------
-My Calculated Field                      11300            10900
-Sprint Health Score                      11450            10950
+Field Name                    RRD Key (use this)    Custom Field ID (do not use)
+------------------------------------------------------------------------------
+My Calculated Field           11300                 10900
+Sprint Health Score           11450                 10950
 ```
-
-Use the **RRD Key** column value in the PoC script — not the Custom Field ID.
 
 **Example RRD filename:**
 ```
@@ -182,16 +189,16 @@ Use the **RRD Key** column value in the PoC script — not the Custom Field ID.
 
 ### REST Endpoints
 
-**ID format:** `{HTTP_METHOD}-{endpointName}` e.g. `GET-myEndpoint`
+**ID format:** `{HTTP_METHOD}-{endpointName}` e.g. `GET-myEndpoint`  
+**Auto-discovered by:** `01-discover-ids.groovy` ✅ (if called at least once)
 
-The easiest way is to run the **ID Discovery Script** — it scans the RRD
-directory and lists every REST endpoint that has ever been called, with
-the exact string to paste into the PoC script.
+The discovery script scans the RRD directory and lists every REST endpoint
+that has ever been called. If you prefer to find one manually:
 
-If you want to find one manually:
 1. Go to **SR admin → REST Endpoints**
    (`/plugins/servlet/scriptrunner/admin/restendpoints`)
-2. Note the endpoint URL path, e.g. `.../custom/myEndpoint`
+2. Note the endpoint name from the script (the method name in the Groovy
+   closure, e.g. `myEndpoint`)
 3. Note the HTTP method (GET, POST, etc.)
 4. Combine them: `GET-myEndpoint`
 
@@ -203,37 +210,22 @@ POST-createIssue.rrd4j
 
 > **Important:** SR only creates the RRD file on the first call to an
 > endpoint. If an endpoint has never been called it will not appear in the
-> discovery script output — and the PoC will return "RRD file not found"
-> for it. That is expected, not a bug.
+> discovery script output — and the usage report will return "RRD file not
+> found" for it. That is expected, not a bug.
 
 ---
 
 ### JQL Functions
 
-**ID format:** the function name itself
+**ID format:** the function name itself  
+**Auto-discovered by:** `01-discover-ids.groovy` ✅ (if called at least once)
 
-**How to find it:**
+The discovery script lists every JQL function that has an RRD file. If you
+prefer to find one manually:
+
 1. Go to **SR admin → JQL Functions**
    (`/plugins/servlet/scriptrunner/admin/jqlfunctions`)
 2. The function name shown in the UI is the RRD key
-
-**Alternative — list all JQL function RRD files from Groovy:**
-```groovy
-import com.atlassian.jira.component.ComponentAccessor
-import com.atlassian.jira.config.util.JiraHome
-
-def home = ComponentAccessor.getComponent(JiraHome).home
-def nodeDir = new File(home, "scriptrunner/rrd/dc-saunders-0")  // ← your node
-nodeDir.listFiles()
-    ?.findAll { f ->
-        String n = f.name.replace('.rrd4j', '')
-        !n.matches(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/) &&
-        !n.matches(/\d+/) &&
-        !n.matches(/(?i)(GET|POST|PUT|DELETE|PATCH)-.+/)
-    }
-    ?.sort { it.name }
-    ?.each { println it.name.replace('.rrd4j', '') }
-```
 
 **Example RRD filename:**
 ```
@@ -247,11 +239,13 @@ myJqlFunction.rrd4j
 
 ### Behaviours & Script Fragments
 
-**Execution tracking: not available.**
+**Execution tracking: not available.**  
+**Auto-discovered by:** `01-discover-ids.groovy` ✅ (inventory only)
 
 SR does not record execution history for Behaviours or Script Fragments.
-No RRD file is created for these feature types. They will not appear in
-any RRD-based report.
+No RRD file is created for these feature types. The discovery script lists
+them for inventory purposes — name and enabled status — but there is no
+execution data to report.
 
 ---
 
@@ -282,6 +276,26 @@ this instance, across all nodes.
 
 ## Step 4 — Understand the output
 
+The usage report shows an **identity section** at the top, followed by the
+**metrics table**. The identity section is looked up automatically from the
+SCRIPT_ID — you do not need to tell the script what type it is.
+
+**Identity section:**
+
+| Field | Description |
+|---|---|
+| Feature Type | e.g. Scheduled Job, Script Field, REST Endpoint |
+| Name | The script's display name, looked up automatically |
+| Details | Owner, HTTP method, workflow name — depends on feature type |
+| Script ID | The ID you provided |
+| RRD file / Nodes with data | Path to the file (single-node) or nodes that had data (multi-node) |
+
+> **Script Listeners** will show "Script Listener (unconfirmed)" as the
+> feature type — SR does not expose listener names via a public API so the
+> name cannot be looked up automatically. The execution data is still correct.
+
+**Metrics table:**
+
 | Value | Meaning |
 |---|---|
 | `~42` | Approximate count. RRD stores averages per 5-min window; the total is the sum of those averages. Common for script fields and listeners. |
@@ -299,26 +313,29 @@ Use the SR admin **Performance tab** for real-time confirmation.
 
 ## Quick reference — ID format by feature type
 
-| Feature Type | RRD Key Format | Where to find it |
-|---|---|---|
-| Scheduled Job | UUID | SR admin → Jobs → Edit → URL `?id=` |
-| Escalation Service | UUID | SR admin → Jobs → Edit → URL `?id=` |
-| Script Listener | UUID | SR admin → Listeners → Edit → URL `?id=` |
-| Workflow Post-Function | UUID | **ID Discovery Script** (or: Workflow editor → Post Functions → Edit → URL) |
-| Script Field | `fieldConfigurationSchemeId` | **ID Discovery Script** (not the custom field ID — see note above) |
-| REST Endpoint | `{METHOD}-{name}` | **ID Discovery Script** (or: SR admin → REST Endpoints → URL + method) |
-| JQL Function | function name | SR admin → JQL Functions → function name |
-| Behaviour | *(not tracked)* | — |
-| Script Fragment | *(not tracked)* | — |
+| Feature Type | RRD Key Format | Auto-discovered? | Where to find it manually |
+|---|---|---|---|
+| Scheduled Job | UUID | ✅ `01-discover-ids.groovy` | SR admin → Jobs → Edit → URL `?id=` |
+| Escalation Service | UUID | ✅ `01-discover-ids.groovy` | SR admin → Jobs → Edit → URL `?id=` |
+| Script Listener | UUID | ❌ Manual only | SR admin → Listeners → Edit → URL |
+| Workflow Post-Function | UUID | ✅ `01-discover-ids.groovy` | Workflow editor → Post Functions → Edit → URL |
+| Script Field | `fieldConfigurationSchemeId` | ✅ `01-discover-ids.groovy` | Not the custom field ID — use discovery script |
+| REST Endpoint | `{METHOD}-{name}` | ✅ `01-discover-ids.groovy` | SR admin → REST Endpoints → name + method |
+| JQL Function | function name | ✅ `01-discover-ids.groovy` | SR admin → JQL Functions → function name |
+| Behaviour | *(not tracked)* | ✅ inventory only | — |
+| Script Fragment | *(not tracked)* | ✅ inventory only | — |
 
 ---
 
 ## Putting it all together
 
-1. Run the **"list all RRD files"** snippet to see what SR is tracking.
-2. Cross-reference with the table above to identify which feature each file belongs to.
-3. For script fields, run the **DB snippet** to get the correct `fieldConfigurationSchemeId`.
-4. Plug the ID and your node name into the PoC script and run it.
+1. Run `01-discover-ids.groovy` to get the correct SCRIPT_ID for the
+   script you want to inspect.
+2. For Script Listeners, collect the UUID manually from SR admin → Listeners.
+3. Paste the SCRIPT_ID into `02-usage-report.groovy` (single-node) or
+   `03-usage-report-multi-node.groovy` (cluster) and run it.
+4. The report identifies the script automatically and shows its name,
+   feature type, and execution metrics.
 
 The PoC is intentionally minimal — it shows you the mechanism. Once you
 are comfortable with how the data is read, you can extend it in any
@@ -328,80 +345,28 @@ all here.
 
 ---
 
-## Multi-node — extending the PoC
+## Multi-node — how it works
 
 On a single-node instance the PoC reads one directory and you are done.
 On a multi-node Data Center cluster, SR writes a separate RRD file for
-each node under its own subdirectory. To get a complete picture you need
-to read the same script ID from every node and sum the counts.
+each node under its own subdirectory. `03-usage-report-multi-node.groovy`
+handles this automatically — it discovers all node directories, reads the
+same script ID from each, and sums the counts.
 
-Here is the minimal extension — swap the single-file read in the PoC for
-this block:
-
-```groovy
-import com.atlassian.jira.component.ComponentAccessor
-import com.atlassian.jira.config.util.JiraHome
-import org.rrd4j.ConsolFun
-import org.rrd4j.core.RrdDb
-
-String SCRIPT_ID = "paste-your-script-id-here"
-
-long nowSec = System.currentTimeMillis().intdiv(1000) as long
-long sec30  = 30L * 86_400L
-long sec60  = 60L * 86_400L
-long sec90  = 90L * 86_400L
-
-def home    = ComponentAccessor.getComponent(JiraHome).home
-def rrdBase = new File(home, "scriptrunner/rrd")
-
-double sum30 = 0, sum60 = 0, sum90 = 0
-double durSum = 0
-int    durCnt = 0
-long   lastTs = 0L
-
-// Loop over every node directory and accumulate counts
-rrdBase.listFiles()?.findAll { it.isDirectory() }?.each { nodeDir ->
-    File rrdFile = new File(nodeDir, "${SCRIPT_ID}.rrd4j")
-    if (!rrdFile.exists()) return   // this node has no data for this script
-
-    RrdDb db = RrdDb.getBuilder().setPath(rrdFile.absolutePath).readOnly().build()
-    def fd = db.createFetchRequest(ConsolFun.AVERAGE, nowSec - sec90, nowSec).fetchData()
-    db.close()
-
-    long[]   timestamps = fd.timestamps
-    double[] counts     = fd.getValues('count')
-    double[] durations  = fd.getValues('duration')
-
-    (0..<fd.rowCount).each { int i ->
-        double c = counts[i]
-        double d = durations[i]
-        if (!Double.isNaN(c)) {
-            sum90 += c
-            if (timestamps[i] >= nowSec - sec60) sum60 += c
-            if (timestamps[i] >= nowSec - sec30) sum30 += c
-            if (c > 0 && timestamps[i] > lastTs) lastTs = timestamps[i]
-        }
-        if (!Double.isNaN(d)) { durSum += d; durCnt++ }
-    }
-}
-
-println "30d: ~${(long)(sum30 + 0.5)}"
-println "60d: ~${(long)(sum60 + 0.5)}"
-println "90d: ~${(long)(sum90 + 0.5)}"
-println "Avg duration: ${durCnt > 0 ? (long)(durSum / durCnt) + ' ms' : '—'}"
-println "Last run: ${lastTs > 0 ? new java.text.SimpleDateFormat('yyyy-MM-dd').format(new Date(lastTs * 1000L)) : '—'}"
-```
-
-**What this does differently from the single-node PoC:**
+**What it does differently from the single-node script:**
 - Discovers node directories automatically — no hardcoded node name needed
 - Skips nodes that have no RRD file for this script (normal — a node only
   has a file if the script has run on that node)
+- Shows which nodes had data and which did not
 - Adds counts across nodes (a script that ran 10 times on node-0 and 5
   times on node-1 shows 15 total)
-- Averages duration across nodes (a rough approximation — good enough for
-  a PoC)
 
 **One thing to be aware of:** RRD stores averages per 5-minute window, so
 the summed counts are already approximate (hence the `~` prefix). Summing
 across nodes compounds that approximation slightly, but the result is a
 reliable indicator of relative activity.
+
+If you want to extend the multi-node approach yourself — for example to
+loop over multiple script IDs — the core pattern is in
+`03-usage-report-multi-node.groovy`. Read it, understand the loop, and
+build from there.
