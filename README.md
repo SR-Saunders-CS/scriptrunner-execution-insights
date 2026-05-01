@@ -79,13 +79,15 @@ Each card in the report shows a **SCRIPT_ID** value and an **RRD ✓** badge
 if an RRD file already exists for that script on your node.
 
 #### A note on Script Listeners
+ScriptRunner doesn't expose a public API to list listener UUIDs, so you'll need to grab them from the browser URL.
 
-ScriptRunner does not expose a public API to list listener UUIDs, so listeners
-cannot be fully auto-discovered. We cannot confirm this programmatically. To find out what a UUID belongs to:
-  1. Go to SR admin → Listeners
-  2. Click Edit next to each listener
-  3. Compare the UUID in the browser URL with the UUIDs listed below
+Go to ScriptRunner admin → Listeners
+Click Edit next to a listener
+Copy the UUID from the end of the URL: https://<your-jira-base-url>/plugins/servlet/scriptrunner/admin/listeners/edit/<listener-uuid>
 
+Match it against the UUIDs listed below.
+
+Example: https://jira.example.com/plugins/servlet/scriptrunner/admin/listeners/edit/dae8a1ee-f9fa-4300-af7a-f836597c9c2f → UUID is dae8a1ee-f9fa-4300-af7a-f836597c9c2f
 ---
 
 ### Step 3 — Run the usage report
