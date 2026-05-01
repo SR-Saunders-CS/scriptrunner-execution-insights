@@ -17,7 +17,8 @@ This repository shows you how to read that data from a Groovy script running
 in the ScriptRunner Script Console. The goal is to demonstrate that the data
 exists and is accessible. What you build on top of it is up to you.
 
-**This is a starting point, not a finished product.** However, if you wish to see what a full implementation *could* look like, please check  
+**This is a starting point, not a finished product.** However, if you wish to
+see what a full implementation *could* look like, please check
 [`advanced/execution-insights-advanced.groovy`](advanced/execution-insights-advanced.groovy)
 
 ---
@@ -26,7 +27,6 @@ exists and is accessible. What you build on top of it is up to you.
 
 - Jira Data Center with ScriptRunner installed
 - Access to the ScriptRunner **Script Console**
-
 
 ---
 
@@ -46,8 +46,13 @@ def home = ComponentAccessor.getComponent(JiraHome).home
 new File(home, "scriptrunner/rrd").listFiles()?.each { println it.name }
 ```
 
-The output will be one or more directory names — for example, [/var/atlassian/application-data/jira/shared-home/scriptrunner/rrd/dc-saunders-0]
-Where `dc-saunders-0`. is the `NODE_ID`.
+The output will be one or more directory names, for example:
+
+```
+/var/atlassian/application-data/jira/shared-home/scriptrunner/rrd/dc-saunders-0
+```
+
+Where `dc-saunders-0` is your `NODE_ID`.
 
 ---
 
@@ -73,21 +78,29 @@ feature type on your instance:
 | JQL Functions | Function name | ✅ Yes (if called at least once) |
 | Script Fragments | Name + enabled status | ✅ Yes (inventory only — not tracked) |
 | Behaviours | Name + enabled status | ✅ Yes (inventory only — not tracked) |
-| Script Listeners | Instructions + UUID hints | ⚠ No — see below |
+| Script Listeners | Step-by-step instructions | ⚠ No — see below |
 
 Each card in the report shows a **SCRIPT_ID** value and an **RRD ✓** badge
-If an RRD file already exists for that script on your node.
+if an RRD file already exists for that script on your node.
 
 #### A note on Script Listeners
-ScriptRunner doesn't expose a public API to list listener UUIDs, so you'll need to grab them from the browser URL.
 
-Go to ScriptRunner admin → Listeners
-Click Edit next to a listener
-Copy the UUID from the end of the URL: https://<your-jira-base-url>/plugins/servlet/scriptrunner/admin/listeners/edit/<listener-uuid>
+ScriptRunner does not expose a public API to list listener UUIDs, so they
+cannot be auto-discovered. The discovery script explains this clearly and
+tells you exactly what to do:
 
-Match it against the UUIDs listed below.
+1. Go to SR admin → Listeners
+2. Click **Edit** next to a listener
+3. Copy the UUID from the browser URL:
+   ```
+   .../scriptrunner/admin/listeners/edit/dae8a1ee-f9fa-4300-af7a-f836597c9c2f
+   ```
+   The UUID is the last segment — `dae8a1ee-f9fa-4300-af7a-f836597c9c2f`
+4. Use that UUID as the `SCRIPT_ID` in the usage report
 
-Example: jira.example.com/plugins/servlet/scriptrunner/admin/listeners/edit/dae8a1ee-f9fa-4300-af7a-f836597c9c2f → UUID is dae8a1ee-f9fa-4300-af7a-f836597c9c2f
+The execution data for that listener is already on disk — you are just
+telling the script where to look.
+
 ---
 
 ### Step 3 — Run the usage report
@@ -101,7 +114,20 @@ String SCRIPT_ID = "paste-your-id-here"   // ← from Step 2
 String NODE_ID   = "dc-saunders-0"        // ← your node name
 ```
 
-Run it in the Script Console. It outputs a simple HTML table showing:
+Run it in the Script Console. The report automatically identifies the script
+and shows its name and feature type alongside the execution metrics.
+
+**Identity section** (shown at the top):
+
+| Field | Description |
+|---|---|
+| Feature Type | e.g. Scheduled Job, Script Field, REST Endpoint |
+| Name | The script's display name, looked up automatically from the ID |
+| Details | Owner, HTTP method, workflow name — depends on feature type |
+| Script ID | The ID you provided |
+| RRD file | The full path to the RRD file on disk |
+
+**Metrics section**:
 
 | Metric | Description |
 |---|---|
@@ -111,14 +137,20 @@ Run it in the Script Console. It outputs a simple HTML table showing:
 | Avg duration | Mean execution time in ms over the 90-day window |
 | Last execution | Date of the most recent recorded execution |
 
+> **Script Listeners:** if the UUID belongs to a listener, the report will
+> show "Script Listener (unconfirmed)" — SR does not expose listener names
+> via a public API so the name cannot be looked up automatically. The
+> execution data will still be correct.
+
 ---
 
 ### Step 4 — Multi-node clusters (optional)
 
 If your Jira instance runs on multiple nodes, use
 [`scripts/usage-report-multi-node.groovy`](scripts/usage-report-multi-node.groovy)
-instead. It discovers all node directories automatically and sums counts
-across every node — no hardcoded node name needed.
+instead. It discovers all node directories automatically, sums counts across
+every node, and shows which nodes had data for that script. Just set
+`SCRIPT_ID` and run — no node name needed.
 
 ---
 
@@ -197,10 +229,9 @@ A script that ran minutes ago may still show 0. Use the SR admin
 Performance tab for real-time confirmation.
 
 **Listener IDs must be found manually.**
-SR does not expose an API to list listener UUIDs. The discovery script
-surfaces unattributed UUID RRD files as hints, but cannot confirm which
-belong to listeners. Go to SR admin → Listeners, click Edit next to each
-listener, and copy the UUID from the browser URL (`?id=...`).
+SR does not expose an API to list listener UUIDs. Go to SR admin →
+Listeners, click Edit next to each listener, and copy the UUID from the
+browser URL. See Step 2 above for the full instructions.
 
 **Behaviours and Script Fragments are not tracked.**
 SR does not write RRD files for these feature types. They appear in the
