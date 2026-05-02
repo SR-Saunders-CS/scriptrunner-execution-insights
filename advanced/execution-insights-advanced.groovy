@@ -21,8 +21,8 @@
 // Find the UUID by editing a listener in SR admin and copying it from the URL.
 //
 Map<String, String> listenerIds = [
-    // "paste-uuid-here"                     : "Listener display name", below is an example of a UUID and the Listener name
-   // "dae8a1ee-f9fa-4300-af7a-f836597c9c2f" : "Welcome Comment on Issue Creation"
+    "e2c59022-d52f-48ae-bf23-ec04dc5238dc" : "Auto-Set Priority for Bugs",
+    "dae8a1ee-f9fa-4300-af7a-f836597c9c2f" : "Welcome Comment on Issue Creation"
 ] as Map<String, String>
 
 // Set to true if this is a multi-node Data Center cluster.
@@ -718,18 +718,23 @@ jobMgr?.load()?.each { AbstractScheduledJobCommand j ->
 // Execution counts come from RRD — SR creates the RRD file on first call,
 // so endpoints that have never been called will show "n/a" (not "0").
 //
-// We match each endpoint config entry to its RRD key by looking for an RRD
-// key whose name (after stripping the HTTP method prefix) appears in the
-// endpoint's display name. This is a heuristic — it may not match perfectly
-// if the endpoint name contains unusual characters.
+// We match each endpoint config entry to its RRD key by normalising both
+// the display name and the RRD key name (stripping the HTTP method prefix,
+// lowercasing, and removing all non-alphanumeric characters) before comparing.
+// This handles camelCase RRD keys like "validationTest" matching display
+// names like "Validation Test Endpoint" that would otherwise fail a simple
+// substring check.
 List<String> restRrdKeys = rrdData.keySet()
     .findAll { it.matches(/(?i)(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)-.+/) }
     .sort() as List<String>
 
 restEndpoints.each { Map<String, Object> cfg ->
-    String name = (cfg['FIELD_NOTES'] ?: '') as String
+    String displayName = (cfg['FIELD_NOTES'] ?: '') as String
     String rrdKey = restRrdKeys.find { String k ->
-        name.toLowerCase().contains(k.replaceFirst(/(?i)^(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)-/, '').toLowerCase())
+        String kName            = k.replaceFirst(/(?i)^(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)-/, '')
+        String normalizedDisplay = displayName.toLowerCase().replaceAll(/[^a-z0-9]/, '')
+        String normalizedRrdName = kName.toLowerCase().replaceAll(/[^a-z0-9]/, '')
+        normalizedDisplay.contains(normalizedRrdName) || normalizedRrdName.contains(normalizedDisplay)
     } ?: ''
     Row r = new Row(
         type   : "REST Endpoint",
