@@ -17,7 +17,7 @@ This repository shows you how to read that data from a Groovy script running
 in the ScriptRunner Script Console. The goal is to demonstrate that the data
 exists and is accessible. What you build on top of it is up to you.
 
-**This is a starting point, not a finished product.** However, if you wish to
+This is a starting point, not a finished product.** However, if you wish to
 see what a full implementation *could* look like, please check
 [`advanced/execution-insights-advanced.groovy`](advanced/execution-insights-advanced.groovy)
 and the image below:
