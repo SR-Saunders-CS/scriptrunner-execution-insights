@@ -20,7 +20,8 @@ exists and is accessible. What you build on top of it is up to you.
 **This is a starting point, not a finished product.** However, if you wish to
 see what a full implementation *could* look like, please check
 [`advanced/execution-insights-advanced.groovy`](advanced/execution-insights-advanced.groovy)
-
+and the image below:
+![ScriptRunner per-script execution metrics output](docs/execution-metrics-output.png)
 ---
 
 ## Prerequisites
