@@ -17,9 +17,13 @@ This repository shows you how to read that data from a Groovy script running
 in the ScriptRunner Script Console. The goal is to demonstrate that the data
 exists and is accessible. What you build on top of it is up to you.
 
-This is a starting point, not a finished product. However, if you wish to see what a full implementation *could* look like, check out [`advanced/execution-insights-advanced.groovy`](advanced/execution-insights-advanced.groovy) — the image below shows example output:
+This is a starting point, not a finished product. However, if you wish to see
+what a full implementation *could* look like, check out
+[`advanced/execution-insights-advanced.groovy`](advanced/execution-insights-advanced.groovy)
+— the image below shows example output:
 
 ![ScriptRunner per-script execution metrics output showing run counts, durations, and success rates](docs/execution-metrics-output.png)
+
 ---
 
 ## Prerequisites
@@ -67,20 +71,25 @@ String NODE_ID = "dc-saunders-0"   // ← change this to your node name
 The discovery script produces an HTML report covering every ScriptRunner
 feature type on your instance:
 
-| Feature Type | What it shows | Auto-discovered? |
-|---|---|---|
-| Scheduled Jobs | UUID + name + owner | ✅ Yes |
-| Escalation Services | UUID + name + owner | ✅ Yes |
-| Script Fields | `fieldConfigurationSchemeId` + field name | ✅ Yes |
-| Workflow Post-Functions | UUID + workflow + transition | ✅ Yes |
-| REST Endpoints | `METHOD-name` key | ✅ Yes (if called at least once) |
-| JQL Functions | Function name | ✅ Yes (if called at least once) |
-| Script Fragments | Name + enabled status | ✅ Yes (inventory only — not tracked) |
-| Behaviours | Name + enabled status | ✅ Yes (inventory only — not tracked) |
-| Script Listeners | Step-by-step instructions | ⚠ No — see below |
+| Feature Type | What it shows | Projects shown? | Auto-discovered? |
+|---|---|---|---|
+| Scheduled Jobs | UUID + name + owner | Not project-scoped | ✅ Yes |
+| Escalation Services | UUID + name + owner | Not project-scoped | ✅ Yes |
+| Script Fields | `fieldConfigurationSchemeId` + field name | ✅ Yes — global or per-project | ✅ Yes |
+| Workflow Post-Functions | UUID + workflow + transition | ✅ Yes — projects using the workflow | ✅ Yes |
+| REST Endpoints | `METHOD-name` key | Not project-scoped | ✅ Yes (if called at least once) |
+| JQL Functions | Function name | Not project-scoped | ✅ Yes (if called at least once) |
+| Script Fragments | Name + enabled status | Not tracked | ✅ Yes (inventory only) |
+| Behaviours | Name + enabled status | Not tracked | ✅ Yes (inventory only) |
+| Script Listeners | Step-by-step instructions | Not accessible via API | ⚠ No — see below |
 
-Each card in the report shows a **SCRIPT_ID** value and an **RRD ✓** badge
-if an RRD file already exists for that script on your node.
+Each card in the report shows a **SCRIPT_ID** value, an **RRD ✓** badge if
+an RRD file already exists for that script on your node, and **project chips**
+showing where the script is configured to apply.
+
+> **Projects shows where a script is configured to apply — not which projects
+> generated each execution.** RRD stores aggregate counts only; per-project
+> execution breakdown is not available.
 
 #### A note on Script Listeners
 
@@ -114,13 +123,13 @@ String NODE_ID   = "dc-saunders-0"        // ← your node name
 ```
 
 Run it in the Script Console. The report automatically identifies the script
-and shows its name and feature type alongside the execution metrics.
+from the ID format — no need to specify the feature type manually.
 
 **Identity section** (shown at the top):
 
 | Field | Description |
 |---|---|
-| Feature Type | e.g. Scheduled Job, Script Field, REST Endpoint |
+| Feature Type | Auto-detected — e.g. Scheduled Job, Script Field, REST Endpoint |
 | Name | The script's display name, looked up automatically from the ID |
 | Details | Owner, HTTP method, workflow name — depends on feature type |
 | Script ID | The ID you provided |
@@ -130,6 +139,7 @@ and shows its name and feature type alongside the execution metrics.
 
 | Metric | Description |
 |---|---|
+| Projects | Where the script is configured to apply (auto-resolved from feature type) |
 | Executions — last 30 days | How many times the script ran in the past 30 days |
 | Executions — last 60 days | How many times the script ran in the past 60 days |
 | Executions — last 90 days | How many times the script ran in the past 90 days |
@@ -149,7 +159,11 @@ If your Jira instance runs on multiple nodes, use
 [`scripts/usage-report-multi-node.groovy`](scripts/usage-report-multi-node.groovy)
 instead. It discovers all node directories automatically, sums counts across
 every node, and shows which nodes had data for that script. Just set
-`SCRIPT_ID` and run — no node name needed.
+`SCRIPT_ID` and run — no node name needed, and no feature type to configure.
+
+```groovy
+String SCRIPT_ID = "paste-your-id-here"   // ← the only value you need to set
+```
 
 ---
 
@@ -162,10 +176,12 @@ scriptrunner-execution-insights/
 │
 ├── scripts/
 │   ├── discover-ids.groovy            ← run first: discovers RRD keys
-│   │                                     for every SR feature type
+│   │                                     for every SR feature type,
+│   │                                     with project associations
 │   │
 │   ├── usage-report.groovy            ← single-node usage report for
-│   │                                     one script ID
+│   │                                     one script ID (auto-detects
+│   │                                     feature type and projects)
 │   │
 │   └── usage-report-multi-node.groovy ← same report, sums across all
 │                                         nodes automatically
@@ -239,6 +255,11 @@ discovery script for inventory purposes only.
 **REST Endpoints and JQL Functions only appear after their first call.**
 SR creates the RRD file on first invocation. Scripts that have never run
 will not appear in the discovery report.
+
+**Projects shows configuration, not execution origin.**
+The Projects column shows where a script is *configured* to apply — not
+which projects triggered each execution. RRD stores aggregate counts only;
+per-project execution breakdown is not available from RRD data.
 
 ---
 
