@@ -1,11 +1,12 @@
 // ═══════════════════════════════════════════════════════════════════════
-// scripts/01-discover-ids.groovy
+// scripts/discover-ids.groovy
 // ScriptRunner RRD — ID Discovery Script
 // Run from: Script Console  |  Output: HTML
 //
-// PURPOSE: Show the correct RRD key for every ScriptRunner feature type.
-// Run this first. Copy the SCRIPT_ID you need, then paste it into
-// 02-usage-report.groovy or 03-usage-report-multi-node.groovy.
+// PURPOSE: Show the correct RRD key and project association for every
+// ScriptRunner feature type. Run this first. Copy the SCRIPT_ID you
+// need, then paste it into usage-report.groovy or
+// usage-report-multi-node.groovy.
 // ═══════════════════════════════════════════════════════════════════════
 
 // ── ⚙ SET YOUR NODE DIRECTORY NAME ──────────────────────────────────────
@@ -20,6 +21,7 @@ String NODE_ID = "dc-saunders-0"   // ← your node dir name
 import com.atlassian.jira.component.ComponentAccessor
 import com.atlassian.jira.config.util.JiraHome
 import com.atlassian.jira.workflow.WorkflowManager
+import com.atlassian.jira.workflow.WorkflowSchemeManager
 import com.onresolve.scriptrunner.scheduled.ScheduledScriptJobManager
 import com.onresolve.scriptrunner.scheduled.model.AbstractScheduledJobCommand
 import com.opensymphony.workflow.loader.FunctionDescriptor
@@ -50,13 +52,20 @@ String css = """
   .badge  { display: inline-block; font-size: 10px; font-weight: bold;
              padding: 2px 7px; border-radius: 3px; margin-left: 8px;
              vertical-align: middle; }
-  .badge-inactive { background: #DFE1E6; color: #6B778C; }
-  .badge-active   { background: #E3FCEF; color: #006644; }
+  .badge-inactive   { background: #DFE1E6; color: #6B778C; }
+  .badge-active     { background: #E3FCEF; color: #006644; }
   .badge-escalation { background: #EAE6FF; color: #403294; }
   .meta   { font-size: 11px; color: #6B778C; margin-top: 4px; }
   .meta span { margin-right: 16px; }
   .inactive-note { font-size: 11px; color: #97A0AF; margin-top: 4px;
                    font-style: italic; }
+  .projects { font-size: 11px; color: #403294; margin-top: 3px; margin-bottom: 3px; }
+  .projects .proj-tag    { display: inline-block; background: #EAE6FF;
+                           color: #403294; border-radius: 3px;
+                           padding: 1px 6px; margin: 1px 3px 1px 0;
+                           font-size: 10px; font-weight: bold; }
+  .projects .proj-global { color: #00875A; font-style: italic; }
+  .projects .proj-none   { color: #97A0AF; font-style: italic; }
   .warn   { background: #FFFAE6; border: 1px solid #FFE380; border-radius: 4px;
              padding: 10px 14px; font-size: 12px; margin-bottom: 8px; }
   .info   { background: #DEEBFF; border: 1px solid #4C9AFF; border-radius: 4px;
@@ -80,8 +89,9 @@ try {
         String k = r.getAt('KEY') as String
         String v = r.getAt('SETTING') as String
         if (k && v) {
-            try { stash[k] = new JsonSlurper().parseText(v) as List<Map<String, Object>> }
-            catch (ignored) {}
+            try {
+                stash[k] = new JsonSlurper().parseText(v) as List<Map<String, Object>>
+            } catch (ignored) {}
         }
     }
 } catch (ex) {
@@ -97,6 +107,24 @@ List<File> rrdFiles = nodeDir.exists()
     ? (nodeDir.listFiles()?.findAll { it.name.endsWith('.rrd4j') } ?: [])
     : []
 Set<String> rrdKeys = rrdFiles.collect { it.name.replace('.rrd4j', '') } as Set<String>
+
+// ── Build workflow → projects reverse map ─────────────────────────────────
+// For each project, get its workflow scheme and record which workflows are
+// in use. This lets us show project associations on post-function cards
+// without having to iterate projects inside the workflow loop.
+WorkflowSchemeManager wfSchemeManager =
+    ComponentAccessor.getComponent(WorkflowSchemeManager)
+
+Map<String, List<String>> wfToProjects = [:]
+ComponentAccessor.projectManager.getProjects().each { project ->
+    wfSchemeManager.getWorkflowMap(project)
+        .values()
+        .unique()
+        .each { String wfName ->
+            if (!wfToProjects.containsKey(wfName)) wfToProjects[wfName] = []
+            wfToProjects[wfName] << project.key
+        }
+}
 
 // ── Build HTML ────────────────────────────────────────────────────────────
 StringWriter sw = new StringWriter()
@@ -131,11 +159,14 @@ html.html {
     // 1. SCHEDULED JOBS
     // ════════════════════════════════════════════════════════════════════
     h2("Scheduled Jobs")
-    p(class: "sub", "RRD key = the job UUID. Shown directly from the SR job manager.")
+    p(class: "sub",
+      "RRD key = the job UUID. Shown directly from the SR job manager. " +
+      "Scheduled jobs are instance-wide and are not project-scoped.")
 
     ScheduledScriptJobManager jobMgr = null
     try {
-        jobMgr = ComponentAccessor.getOSGiComponentInstanceOfType(ScheduledScriptJobManager)
+        jobMgr = ComponentAccessor
+            .getOSGiComponentInstanceOfType(ScheduledScriptJobManager)
     } catch (ignored) {}
 
     List<AbstractScheduledJobCommand> jobs = (jobMgr?.load()
@@ -152,6 +183,10 @@ html.html {
                 span(class: "badge " + (j.disabled ? "badge-inactive" : "badge-active"),
                      j.disabled ? "DISABLED" : "ACTIVE")
                 if (hasRrd) span(class: "badge badge-active", "RRD ✓")
+                div(class: "projects") {
+                    mkp.yield("Projects: ")
+                    span(class: "proj-none", "Not project-scoped (instance-wide)")
+                }
                 div(class: "meta") {
                     span { mkp.yield("Name: "); b(j.notes ?: j.id ?: "—") }
                     span("Owner: ${j.ownedBy ?: j.userId ?: '—'}")
@@ -166,7 +201,9 @@ html.html {
     // 2. ESCALATION SERVICES
     // ════════════════════════════════════════════════════════════════════
     h2("Escalation Services")
-    p(class: "sub", "RRD key = the escalation service UUID.")
+    p(class: "sub",
+      "RRD key = the escalation service UUID. " +
+      "Escalation services are instance-wide and are not project-scoped.")
 
     List<AbstractScheduledJobCommand> escalations = (jobMgr?.load()
         ?.findAll { it.class.simpleName == 'EscalationServiceCommand' }
@@ -183,6 +220,10 @@ html.html {
                 span(class: "badge " + (j.disabled ? "badge-inactive" : "badge-active"),
                      j.disabled ? "DISABLED" : "ACTIVE")
                 if (hasRrd) span(class: "badge badge-active", "RRD ✓")
+                div(class: "projects") {
+                    mkp.yield("Projects: ")
+                    span(class: "proj-none", "Not project-scoped (instance-wide)")
+                }
                 div(class: "meta") {
                     span { mkp.yield("Name: "); b(j.notes ?: j.id ?: "—") }
                     span("Owner: ${j.ownedBy ?: j.userId ?: '—'}")
@@ -218,11 +259,16 @@ Repeat once per listener. This takes about 30 seconds each.
 
     // ════════════════════════════════════════════════════════════════════
     // 4. SCRIPT FIELDS
+    //    RRD key = fieldConfigurationSchemeId (NOT the Jira custom field
+    //    ID). Read directly from the Java API — no DB query needed.
+    //    Project association read from the FieldConfigScheme object.
     // ════════════════════════════════════════════════════════════════════
     h2("Script Fields")
     p(class: "sub",
       "RRD key = fieldConfigurationSchemeId — NOT the Jira custom field ID. " +
-      "The custom field ID is shown for reference only.")
+      "The custom field ID is shown for reference only. " +
+      "Projects shows where the field is configured to apply — not which " +
+      "projects generated each execution.")
 
     List srFields = ComponentAccessor.customFieldManager
         .getCustomFieldObjects()
@@ -241,6 +287,22 @@ Repeat once per listener. This takes about 30 seconds each.
                     p(class: "label", "SCRIPT_ID")
                     span(class: "id-box", scheme.id.toString())
                     if (hasRrd) span(class: "badge badge-active", "RRD ✓")
+                    // Projects — shown before field name so you can scan by project.
+                    div(class: "projects") {
+                        mkp.yield("Projects: ")
+                        if (scheme.isGlobal()) {
+                            span(class: "proj-global", "All projects (global context)")
+                        } else {
+                            List<String> projKeys = scheme.getAssociatedProjectObjects()
+                                .collect { it.key }
+                                .sort()
+                            if (projKeys) {
+                                projKeys.each { k -> span(class: "proj-tag", k) }
+                            } else {
+                                span(class: "proj-none", "No projects assigned")
+                            }
+                        }
+                    }
                     div(class: "meta") {
                         span { mkp.yield("Field name: "); b(cf.name ?: '(unnamed)') }
                         span("Custom Field ID (do not use as key): customfield_${cf.idAsLong}")
@@ -254,10 +316,17 @@ Repeat once per listener. This takes about 30 seconds each.
 
     // ════════════════════════════════════════════════════════════════════
     // 5. WORKFLOW POST-FUNCTIONS
+    //    RRD key = FIELD_FUNCTION_ID stored in the function args.
+    //    Walk every workflow and transition to find SR post-functions.
+    //    Project association derived from the workflow scheme reverse map.
+    //    Inactive workflows are shown greyed out — their post-functions
+    //    will not run and will show no execution data in the report.
     // ════════════════════════════════════════════════════════════════════
     h2("Workflow Post-Functions")
     p(class: "sub",
       "RRD key = FIELD_FUNCTION_ID from the post-function configuration. " +
+      "Projects shows which projects use the parent workflow — not which " +
+      "projects generated each execution. " +
       "Inactive workflows are shown greyed out.")
 
     Set<String> seenIds = [] as Set<String>
@@ -282,12 +351,28 @@ Repeat once per listener. This takes about 30 seconds each.
                 anyPostFn = true
                 boolean hasRrd = rrdKeys.contains(fid)
 
-                div(class: active ? "card" : "card inactive") {
+                List<String> projects = (wfToProjects[wf.name] ?: []) as List<String>
+                String cardClass = active ? "card" : "card inactive"
+                String idClass   = active ? "id-box" : "id-box inactive"
+
+                div(class: cardClass) {
                     p(class: "label", "SCRIPT_ID")
-                    span(class: active ? "id-box" : "id-box inactive", fid)
+                    span(class: idClass, fid)
                     span(class: "badge " + (active ? "badge-active" : "badge-inactive"),
                          active ? "ACTIVE" : "INACTIVE WORKFLOW")
                     if (hasRrd) span(class: "badge badge-active", "RRD ✓")
+                    // Projects — shown before workflow/transition so you can
+                    // quickly scan by project to find the right script.
+                    div(class: "projects") {
+                        mkp.yield("Projects: ")
+                        if (projects) {
+                            projects.sort().each { k -> span(class: "proj-tag", k) }
+                        } else {
+                            span(class: "proj-none",
+                                 active ? "No projects use this workflow"
+                                        : "Workflow is inactive — not assigned to any project")
+                        }
+                    }
                     div(class: "meta") {
                         span { mkp.yield("Workflow: "); b(wf.name ?: '(unnamed)') }
                         span { mkp.yield("Transition: "); b(action.name ?: '(unnamed)') }
@@ -304,11 +389,16 @@ Repeat once per listener. This takes about 30 seconds each.
 
     // ════════════════════════════════════════════════════════════════════
     // 6. REST ENDPOINTS
+    //    RRD key = {HTTP_METHOD}-{endpointName}  e.g. GET-myEndpoint
+    //    SR only creates the RRD file on the first call, so endpoints
+    //    that have never been called will not appear here.
+    //    REST endpoints are instance-wide — not project-scoped.
     // ════════════════════════════════════════════════════════════════════
     h2("REST Endpoints")
     p(class: "sub",
       "RRD key = {METHOD}-{endpointName} e.g. GET-myEndpoint. " +
-      "Only endpoints called at least once appear here — SR creates the RRD file on first invocation.")
+      "Only endpoints called at least once appear here — SR creates the RRD file on first invocation. " +
+      "REST endpoints are instance-wide and are not project-scoped.")
 
     List<String> restKeys = rrdKeys.findAll { String k ->
         k.matches(/(?i)(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)-.+/)
@@ -322,6 +412,10 @@ Repeat once per listener. This takes about 30 seconds each.
                 p(class: "label", "SCRIPT_ID")
                 span(class: "id-box", key)
                 span(class: "badge badge-active", "RRD ✓")
+                div(class: "projects") {
+                    mkp.yield("Projects: ")
+                    span(class: "proj-none", "Not project-scoped (instance-wide)")
+                }
                 div(class: "meta") {
                     span { mkp.yield("Method: "); b(method) }
                     span { mkp.yield("Endpoint name: "); b(name) }
@@ -337,7 +431,8 @@ Repeat once per listener. This takes about 30 seconds each.
     // ════════════════════════════════════════════════════════════════════
     h2("JQL Functions")
     p(class: "sub",
-      "RRD key = the function name. Only functions called at least once appear here.")
+      "RRD key = the function name. Only functions called at least once appear here. " +
+      "JQL functions are instance-wide and are not project-scoped.")
 
     List<String> jqlKeys = rrdKeys.findAll { String k ->
         !k.matches(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/) &&
@@ -351,6 +446,10 @@ Repeat once per listener. This takes about 30 seconds each.
                 p(class: "label", "SCRIPT_ID")
                 span(class: "id-box", key)
                 span(class: "badge badge-active", "RRD ✓")
+                div(class: "projects") {
+                    mkp.yield("Projects: ")
+                    span(class: "proj-none", "Not project-scoped (instance-wide)")
+                }
                 div(class: "meta") {
                     span("Use in JQL: issueFunction in ${key}(...)")
                 }
@@ -372,13 +471,16 @@ Fragments are listed here for inventory purposes only.
 """)
     }
 
-    List<Map<String, Object>> fragments = stash['ui_fragments'] ?: stash['fragments'] ?: []
+    List<Map<String, Object>> fragments =
+        stash['ui_fragments'] ?: stash['fragments'] ?: []
     if (fragments) {
         fragments.sort { it['FIELD_NOTES'] ?: it['name'] ?: '' }.each { Map cfg ->
             div(class: "card") {
                 div(class: "meta") {
-                    span { mkp.yield("Name: ")
-                        b((cfg['FIELD_NOTES'] ?: cfg['name'] ?: cfg['id'] ?: '—') as String) }
+                    span {
+                        mkp.yield("Name: ")
+                        b((cfg['FIELD_NOTES'] ?: cfg['name'] ?: cfg['id'] ?: '—') as String)
+                    }
                     span("Enabled: ${cfg.disabled ? 'false' : 'true'}")
                     span("Owner: ${cfg.ownedBy ?: '—'}")
                 }
@@ -407,7 +509,8 @@ Behaviours are listed here for inventory purposes only.
         Map<String, com.onresolve.jira.behaviours.types.BehaviourEditState> configs =
             behaviourMgr?.getAllConfigs()
         if (configs) {
-            configs.each { String id, com.onresolve.jira.behaviours.types.BehaviourEditState state ->
+            configs.each { String id,
+                           com.onresolve.jira.behaviours.types.BehaviourEditState state ->
                 div(class: "card") {
                     div(class: "meta") {
                         span { mkp.yield("Name: "); b(state?.name ?: id) }
@@ -422,13 +525,13 @@ Behaviours are listed here for inventory purposes only.
         p(class: "none", "(behaviours unavailable)")
     }
 
-
-
     hr()
     p(class: "sub",
       "RRD ✓ = an RRD file exists for this script on node ${NODE_ID}. " +
       "Scripts without RRD ✓ have either never run or have not yet had their " +
-      "first execution recorded to disk.")
+      "first execution recorded to disk. " +
+      "Projects shows where a script is configured to apply — not which " +
+      "projects generated each execution.")
 
   } // body
 } // html
